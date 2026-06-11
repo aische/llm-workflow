@@ -23,9 +23,9 @@ import LLM
     generateTextWithFallbacks,
     streamTextWithFallbacks,
   )
-import LLM.Agent.ToolUtils (getResolvedTools)
+import LLM.Agent.ToolUtils (getResolvedTools, createToolContext)
 import LLM.Agent.Types (Agent (..), RuntimeArgs (..), ToolMap)
-import LLM.Workflow.ToolUtils (createToolContext, executeTool)
+import LLM.Workflow.ToolUtils (executeTool)
 import LLM.Workflow.Types
   ( AgentWithModels (agent, models),
     Kont (..),

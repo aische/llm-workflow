@@ -41,7 +41,7 @@ import LLM.Generate.Types
 import LLM.Load.FsTools (fsTools')
 import LLM.Load.LoadModels (loadModelsOrThrow)
 import LLM.Workflow (ToolOutcome (ToolReply), emptyFinal)
-import LLM.Workflow.ToolUtils (toTool, toTypedWorkflowTool, typedWorkflowToolToTool, workflowToolTyped)
+import LLM.Workflow.ToolUtils (typedWorkflowToolToTool, workflowToolTyped)
 import LLM.Workflow.Types
   ( AgentWithModels (..),
     CID (CID),
@@ -104,7 +104,7 @@ orchestratorAgent =
           \- subagent: filesystem-capable child agent for a single task",
       agTools = ["subagent"],
       agMaxToolRounds = 5,
-      agContextWindow = Nothing
+      agContextWindow = Just 3
     }
 
 -- ---------------------------------------------------------------------------

@@ -1,9 +1,5 @@
 module LLM.Workflow.ToolUtils
-  ( createToolContext,
-    getSchema,
-    toTool,
-    windowOffset,
-    executeTool,
+  ( executeTool,
     toTypedWorkflowTool,
     workflowToolTyped,
     typedWorkflowToolToTool,
@@ -24,12 +20,9 @@ import LLM
     ToolCall (..),
     ToolContext (..),
     ToolDef (..),
-    Turn,
     TypedTool (..),
   )
-import LLM.Agent (Agent (..), RuntimeArgs (..))
-import LLM.Core.Types (Turn (..))
-import LLM.Core.Usage (Usage (..))
+import LLM.Agent.ToolUtils (getSchema)
 import LLM.Workflow.Types
   ( PromptArgs,
     ToolOutcome (..),
@@ -52,22 +45,22 @@ executeTool hooks ctx tools tc = case lookup tc.tcName toolMap of
   where
     toolMap = [(t.toolDef.toolName, t.toolExecute) | t <- tools]
 
-createToolContext ::
-  Agent ->
-  [Turn] ->
-  Usage ->
-  RuntimeArgs ->
-  ToolContext
-createToolContext agent messages roundUsage rt =
-  ToolContext
-    { tcConversation = messages,
-      tcUsage = roundUsage,
-      tcWindowOffset = windowOffset agent.agContextWindow messages,
-      tcRuntimeArgs = rt
-    }
+-- createToolContext ::
+--   Agent ->
+--   [Turn] ->
+--   Usage ->
+--   RuntimeArgs ->
+--   ToolContext
+-- createToolContext agent messages roundUsage rt =
+--   ToolContext
+--     { tcConversation = messages,
+--       tcUsage = roundUsage,
+--       tcWindowOffset = windowOffset agent.agContextWindow messages,
+--       tcRuntimeArgs = rt
+--     }
 
-getSchema :: (AC.HasCodec t, FromJSON t) => tool ToolContext t -> AC.JSONCodec t
-getSchema _ = AC.codec
+-- getSchema :: (AC.HasCodec t, FromJSON t) => tool ToolContext t -> AC.JSONCodec t
+-- getSchema _ = AC.codec
 
 toTypedWorkflowTool :: (AC.HasCodec t, FromJSON t) => TypedTool ToolContext t -> TypedWorkflowTool ToolContext t
 toTypedWorkflowTool (TypedTool name descr readonly exec) =
@@ -78,12 +71,12 @@ toTypedWorkflowTool (TypedTool name descr readonly exec) =
       twtExecute = \ctx args -> ToolReply <$> liftIO (exec ctx args)
     }
 
-class (AC.HasCodec a, FromJSON a) => ToTool t a where
-  toTool :: t ToolContext a -> Tool ToolOutcome
+-- class (AC.HasCodec a, FromJSON a) => ToTool t a where
+--   toTool :: t ToolContext a -> Tool ToolOutcome
 
-instance (AC.HasCodec a, FromJSON a) => ToTool TypedTool a where
-  toTool :: TypedTool ToolContext a -> Tool ToolOutcome
-  toTool = typedWorkflowToolToTool . toTypedWorkflowTool
+-- instance (AC.HasCodec a, FromJSON a) => ToTool TypedTool a where
+--   toTool :: TypedTool ToolContext a -> Tool ToolOutcome
+--   toTool = typedWorkflowToolToTool . toTypedWorkflowTool
 
 typedWorkflowToolToTool :: (AC.HasCodec t, FromJSON t) => TypedWorkflowTool ToolContext t -> Tool ToolOutcome
 typedWorkflowToolToTool t@(TypedWorkflowTool name descr readonly exec) =
@@ -111,59 +104,3 @@ workflowToolTyped name description mkWorkflow =
         let (workflow, promptArgs) = mkWorkflow args ctx
         pure $ ToolWorkflow workflow promptArgs
     }
-
--- filterReadonlyTools :: Bool -> [Tool m] -> [Tool m]
--- filterReadonlyTools False tools = tools
--- filterReadonlyTools True tools = filter (\x -> x.toolDef.toolReadonly) tools
-
--- | Compute the index where the visible window starts.
--- The window includes the last @n@ user messages and all turns that follow
--- each of them (assistant replies, tool rounds, etc.).
--- Returns 0 (no windowing) when the window is 'Nothing' or the conversation
--- contains fewer than @n@ user messages.
-windowOffset :: Maybe Int -> [Turn] -> Int
-windowOffset Nothing _ = 0
-windowOffset (Just n) conv = findNthUserFromEnd n conv
-
--- | Find the index of the Nth 'UserTurn' from the end of a conversation.
--- Returns 0 if there are fewer than @n@ user messages.
-findNthUserFromEnd :: Int -> [Turn] -> Int
-findNthUserFromEnd 0 _conv = 0
-findNthUserFromEnd n conv = go (length conv - 1) n
-  where
-    go idx remaining
-      | idx < 0 = 0
-      | remaining <= 0 = idx + 1
-      | otherwise = case conv !! idx of
-          UserTurn _ -> go (idx - 1) (remaining - 1)
-          _ -> go (idx - 1) remaining
-
--- createGenRequest :: (MonadIO m) => Agent -> RuntimeArgs m -> [Turn] -> GenRequest
--- createGenRequest agent rt messages =
---   let offset = windowOffset agent.agContextWindow messages
---       tools = getResolvedTools agent rt
---    in GenRequest
---         { grSystemPrompt = agent.agSystemPrompt,
---           grTools = map (\x -> x.toolDef) tools,
---           grMessages = drop offset messages,
---           grAbortSignal = rt.rtAbortSignal,
---           grLLMHooks = rt.rtLLMHooks,
---           grHooks = rt.rtHooks
---         }
-
--- getResolvedTools :: (MonadIO m) => Agent -> RuntimeArgs m -> [Tool m]
--- getResolvedTools agent rt = filterReadonlyTools rt.rtReadonly tools ++ getHistoryTool agent
---   where
---     tools = getToolsFromMap rt.rtToolMap agent.agTools
-
--- getToolsFromMap :: ToolMap m -> [Text] -> [Tool m]
--- getToolsFromMap toolMap toolNames = toolNames >>= lookupTool
---   where
---     lookupTool name = case Map.lookup name toolMap of
---       Just tool -> [tool]
---       Nothing -> []
-
--- getHistoryTool :: (MonadIO m) => Agent -> [Tool m]
--- getHistoryTool agent = case agent.agContextWindow of
---   Just n | n > 0 -> [typedWorkflowToolToTool historyToolTyped]
---   _ -> []
