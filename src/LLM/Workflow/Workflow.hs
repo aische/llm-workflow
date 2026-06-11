@@ -23,7 +23,7 @@ import LLM
     generateTextWithFallbacks,
     streamTextWithFallbacks,
   )
-import LLM.Agent.ToolUtils (getResolvedTools, createToolContext)
+import LLM.Agent.ToolUtils (createToolContext, getResolvedTools)
 import LLM.Agent.Types (Agent (..), RuntimeArgs (..), ToolMap)
 import LLM.Workflow.ToolUtils (executeTool)
 import LLM.Workflow.Types
@@ -91,7 +91,6 @@ eval toolMap rt (Stack uAcc step konts) = do
   let space = T.replicate (stackSize konts) " "
       cents = "(¢ " <> T.pack (show (usageCents uAcc)) <> ")"
   _ <- TIO.putStrLn $ space <> cents <> " " <> showStep step <> T.unwords (map (" : " <>) (showKont konts))
-  -- _ <- liftIO $ TIO.putStrLn $ space <> "Usage (cents): " <> T.pack (show (usageCents uAcc))
   case step of
     RunObject pending -> do
       result <- callLLMO toolMap rt pending
@@ -100,7 +99,6 @@ eval toolMap rt (Stack uAcc step konts) = do
         Right (value, usage) -> pure $ Stack (uAcc <> usage) (RunReturn value) konts
     RunPrompt pending mcid -> do
       let agentName = pending.prompt.agent.agent.agName
-      -- result <- liftIO (callLLM rt pending)
       _ <- TIO.putStr $ space <> agentName <> ": "
       result <- streamLLM (TIO.putStr . showStreamChunk) toolMap rt pending
       case result of

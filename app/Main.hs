@@ -74,7 +74,6 @@ main = do
       _models2 = ModelWithFallbacks {mwfModel = mistral, mwfFallbacks = []}
       _models3 = ModelWithFallbacks {mwfModel = gemini, mwfFallbacks = []}
       _models4 = ModelWithFallbacks {mwfModel = deepseek, mwfFallbacks = []}
-  -- _models4 = ModelWithFallbacks {mwfModel = deepseek, mwfFallbacks = [gpt, gemini, haiku]}
 
   let wf1 = buildWf1Workflow (_models4, _models4)
       p1 =
@@ -82,7 +81,7 @@ main = do
         \with actionable recommendations and a concise final report."
 
   toolMap <-
-    fsTools' ToolReply "./user-workspace/" -- put some code files in this directory
+    fsTools' ToolReply "./user-workspace/"
       <&> addTools
         [ typedWorkflowToolToTool $
             subagent "subagent" "Use this tool to gain expert knowledge about a topic. Provide a topic." $

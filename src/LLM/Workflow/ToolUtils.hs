@@ -45,23 +45,6 @@ executeTool hooks ctx tools tc = case lookup tc.tcName toolMap of
   where
     toolMap = [(t.toolDef.toolName, t.toolExecute) | t <- tools]
 
--- createToolContext ::
---   Agent ->
---   [Turn] ->
---   Usage ->
---   RuntimeArgs ->
---   ToolContext
--- createToolContext agent messages roundUsage rt =
---   ToolContext
---     { tcConversation = messages,
---       tcUsage = roundUsage,
---       tcWindowOffset = windowOffset agent.agContextWindow messages,
---       tcRuntimeArgs = rt
---     }
-
--- getSchema :: (AC.HasCodec t, FromJSON t) => tool ToolContext t -> AC.JSONCodec t
--- getSchema _ = AC.codec
-
 toTypedWorkflowTool :: (AC.HasCodec t, FromJSON t) => TypedTool ToolContext t -> TypedWorkflowTool ToolContext t
 toTypedWorkflowTool (TypedTool name descr readonly exec) =
   TypedWorkflowTool
@@ -70,13 +53,6 @@ toTypedWorkflowTool (TypedTool name descr readonly exec) =
       twtReadonly = readonly,
       twtExecute = \ctx args -> ToolReply <$> liftIO (exec ctx args)
     }
-
--- class (AC.HasCodec a, FromJSON a) => ToTool t a where
---   toTool :: t ToolContext a -> Tool ToolOutcome
-
--- instance (AC.HasCodec a, FromJSON a) => ToTool TypedTool a where
---   toTool :: TypedTool ToolContext a -> Tool ToolOutcome
---   toTool = typedWorkflowToolToTool . toTypedWorkflowTool
 
 typedWorkflowToolToTool :: (AC.HasCodec t, FromJSON t) => TypedWorkflowTool ToolContext t -> Tool ToolOutcome
 typedWorkflowToolToTool t@(TypedWorkflowTool name descr readonly exec) =

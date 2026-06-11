@@ -118,18 +118,6 @@ data TypedWorkflowTool c a = TypedWorkflowTool
     twtExecute :: c -> a -> IO ToolOutcome
   }
 
--- | Context passed to tool implementations during execution.
--- data ToolContext m = ToolContext
---   { -- | Full conversation history (not windowed), one message per turn
---     tcConversation :: [Turn],
---     -- | Accumulated token usage so far
---     tcUsage :: Usage,
---     -- | Index into 'tcConversation' where the visible window starts.
---     -- Everything before this index is hidden from the model.
---     -- A @get_history@ tool can use this to serve paginated history.
---     tcWindowOffset :: Int,
---     tcRuntimeArgs :: RuntimeArgs
---   }
 data AgentWithModels = AgentWithModels
   { agent :: Agent,
     models :: ModelWithFallbacks
@@ -137,26 +125,3 @@ data AgentWithModels = AgentWithModels
 
 instance Show AgentWithModels where
   show AgentWithModels {agent} = "AgentWithModels {agent = " <> show agent.agName <> "}"
-
--- * Generation events -------------------------------------------------------
-
--- -- | Generation lifecycle event
--- data GenerateEvent = GenerateEvent
---   { geGenerationId :: UUID,
---     geDetail :: GenerateEventDetail
---   }
---   deriving (Show, Eq)
-
--- -- | Generation lifecycle event details
--- data GenerateEventDetail
---   = GenerationStarted
---   | GenerationFinished GenerateTextResult
---   | GenerationFailed GenerateError GenerateErrorResult
---   | MessageCreated Turn
---   | MessageUpdated UUID Text
---   | MessageFinalized Turn
---   | ToolRoundStarted Int
---   | ToolRoundFinished Int
---   deriving (Show, Eq)
-
--- type EventObserver = GenerateEvent -> IO ()
