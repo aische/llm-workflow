@@ -1,0 +1,107 @@
+[
+    {
+        "modelConfigName": "gpt_4_1",
+        "providerName": "openai",
+        "modelName": "gpt-4.1-2025-04-14",
+        "pricing": {
+            "pricePerMillionInput": 2.0,
+            "pricePerMillionOutput": 8.0
+        },
+        "maxTokens": 1024,
+        "temperature": 0.5,
+        "requestTimeout": 10000,
+        "throttleDelay": 1000,
+        "retryCount": 3,
+        "jitterBackoff": 1000
+    },
+    {
+        "modelConfigName": "llama_3_2",
+        "providerName": "ollama",
+        "modelName": "llama3.2:latest",
+        "pricing": {
+            "pricePerMillionInput": 0.0,
+            "pricePerMillionOutput": 0.0
+        },
+        "maxTokens": 1024,
+        "temperature": 0.5,
+        "requestTimeout": 3000,
+        "throttleDelay": 1000,
+        "retryCount": 3,
+        "jitterBackoff": 1000
+    },
+    {
+        "modelConfigName": "mistral",
+        "providerName": "ollama",
+        "modelName": "mistral:latest",
+        "pricing": {
+            "pricePerMillionInput": 0.0,
+            "pricePerMillionOutput": 0.0
+        },
+        "maxTokens": 1024,
+        "temperature": 0.5,
+        "requestTimeout": 30000,
+        "throttleDelay": 1000,
+        "retryCount": 3,
+        "jitterBackoff": 1000
+    },
+    {
+        "modelConfigName": "gemini_2_5_flash",
+        "providerName": "gemini",
+        "modelName": "gemini-2.5-flash",
+        "pricing": {
+            "pricePerMillionInput": 0.1,
+            "pricePerMillionOutput": 0.4
+        },
+        "maxTokens": 1024,
+        "temperature": 0.5,
+        "requestTimeout": 10000,
+        "throttleDelay": 1000,
+        "retryCount": 3,
+        "jitterBackoff": 1000
+    },
+    {
+        "modelConfigName": "gemini_lite",
+        "providerName": "gemini",
+        "modelName": "gemini-3.1-flash-lite",
+        "pricing": {
+            "pricePerMillionInput": 0.1,
+            "pricePerMillionOutput": 0.4
+        },
+        "maxTokens": 1024,
+        "temperature": 0.5,
+        "requestTimeout": 10000,
+        "throttleDelay": 1000,
+        "retryCount": 3,
+        "jitterBackoff": 1000
+    },
+    {
+        "modelConfigName": "haiku_4_5",
+        "providerName": "claude",
+        "modelName": "claude-haiku-4-5-20251001",
+        "pricing": {
+            "pricePerMillionInput": 1,
+            "pricePerMillionOutput": 5
+        },
+        "maxTokens": 1024,
+        "temperature": 0.5,
+        "requestTimeout": 30000,
+        "throttleDelay": 5000,
+        "retryCount": 3,
+        "jitterBackoff": 5000
+    },
+    {
+        "modelConfigName": "deepseek4flash",
+        "providerName": "deepseek",
+        "modelName": "deepseek-v4-flash",
+        "pricing": {
+            "pricePerMillionInput": 0.14,
+            "pricePerMillionOutput": 0.28
+        },
+        "maxTokens": 1024,
+        "temperature": 0.5,
+        "requestTimeout": 20000,
+        "throttleDelay": 3000,
+        "retryCount": 3,
+        "jitterBackoff": 1000
+    }
+]
