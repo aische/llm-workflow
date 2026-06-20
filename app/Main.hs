@@ -1,11 +1,6 @@
-{-# OPTIONS_GHC -Wno-unused-imports #-}
-
 module Main where
 
 import Autodocodec qualified as AC
-import Configuration.Dotenv (defaultConfig, loadFile)
-import Control.Exception (SomeException (SomeException), catch)
-import Control.Monad.IO.Class (MonadIO)
 import Data.Aeson (FromJSON)
 import Data.Functor ((<&>))
 import Data.Map.Strict qualified as Map
@@ -20,19 +15,14 @@ import LLM
     GenerateEvent,
     Hooks (..),
     RuntimeArgs (..),
-    ThinkingMode (..),
     Tool (..),
     ToolContext,
-    claudeGateway,
-    deepSeekGateway,
     defaultDebugHooks,
-    mkFsConfig,
   )
 import LLM.Agent.Types (ToolMap)
-import LLM.Core.Types (LLMHooks (..), ToolDef (..), Turn (UserTurn))
-import LLM.Core.Usage (PricingInfo (..), Usage)
-import LLM.Generate.Logger (noHooks)
-import LLM.Generate.ModelConfig (ModelConfig (..), ModelWithFallbacks (..))
+import LLM.Core.Types (LLMHooks (..), ToolDef (..))
+import LLM.Core.Usage (Usage)
+import LLM.Generate.ModelConfig (ModelWithFallbacks (..))
 import LLM.Generate.Types
   ( GenerateErrorResult (..),
     GenerateTextResult (..),
@@ -40,27 +30,22 @@ import LLM.Generate.Types
   )
 import LLM.Load.FsTools (fsTools')
 import LLM.Load.LoadModels (loadModelsOrThrow)
-import LLM.Workflow (ToolOutcome (ToolReply), emptyFinal)
+import LLM.Workflow (ToolOutcome (ToolReply))
 import LLM.Workflow.ToolUtils (typedWorkflowToolToTool, workflowToolTyped)
 import LLM.Workflow.Types
   ( AgentWithModels (..),
     CID (CID),
     Final (..),
     GetCid (..),
-    Kont,
     LoopContext (..),
-    Prompt (..),
     PromptArgs (..),
-    TranscriptPolicy (TranscriptFinalText, TranscriptFinalToPromptArgs, TranscriptPolicyFunc, TranscriptSummaryText),
+    TranscriptPolicy (..),
     TypedWorkflowTool,
     Workflow (..),
   )
 import LLM.Workflow.Workflow
-  ( eval,
-    loop,
-    runWorkflow,
+  ( runWorkflow,
   )
-import System.Environment (getArgs, getEnv)
 import Wf1 (buildWf1Workflow)
 
 main :: IO ()

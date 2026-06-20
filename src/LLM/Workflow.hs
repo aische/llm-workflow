@@ -1,6 +1,8 @@
 module LLM.Workflow
   ( PromptArgs (..),
     Prompt (..),
+    Pending (..),
+    Final (..),
     Step (..),
     Kont (..),
     CID (..),
