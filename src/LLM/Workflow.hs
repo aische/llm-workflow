@@ -10,6 +10,7 @@ module LLM.Workflow
     Workflow (..),
     AgentWithModels (..),
     ToolOutcome (..),
+    SomeSubmit (..),
     TypedWorkflowTool (..),
     module LLM.Workflow.Workflow,
     module LLM.Workflow.ToolUtils,

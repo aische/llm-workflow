@@ -5,6 +5,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import LLM (getToolCalls)
 import LLM.Agent (Agent (..))
+import LLM.Agent.Types (ToolMap)
 import LLM.Core.Types
   ( ChatResponse (..),
     ToolCall (..),
@@ -20,9 +21,12 @@ import LLM.Workflow.Types
     Pending (prompt, toolRounds),
     Prompt (..),
     PromptArgs (PromptArgs, history, prompt),
+    SomeSubmit (..),
     Step (..),
+    ToolOutcome,
     TranscriptPolicy (..),
   )
+import Unsafe.Coerce (unsafeCoerce)
 
 -- * Conversation mapping functions -----------------------------------------
 
@@ -155,6 +159,23 @@ unwindToCatch kont = case kont of
   KLoopWhileDecision _maxIterations _iteration _workflow _policy _decider _decisionPolicy _cids _nextInput _outputsRev _lastOutput k -> unwindToCatch k
   KUpdateHistory _cid _history k -> unwindToCatch k
   KCatch o k -> Just (CatchFrame o k)
+
+unwindPastTools :: Kont o r -> Kont o r
+unwindPastTools kont = case kont of
+  KTool _pending _mcid _assistantTurn _toolCalls _toolResults _toolCall k ->
+    unwindPastTools (unsafeCoerce k)
+  other -> other
+
+extendToolMap :: Maybe SomeSubmit -> ToolMap ToolOutcome -> ToolMap ToolOutcome
+extendToolMap Nothing toolMap = toolMap
+extendToolMap (Just submit) toolMap =
+  Map.insert submit.ssName submit.ssTool toolMap
+
+ensureAgentTool :: Text -> AgentWithModels -> AgentWithModels
+ensureAgentTool toolName (AgentWithModels ag models) =
+  if toolName `elem` ag.agTools
+    then AgentWithModels ag models
+    else AgentWithModels ag {agTools = toolName : ag.agTools} models
 
 -- * Show functions for debugging -------------------------------------------
 

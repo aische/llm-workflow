@@ -2,6 +2,7 @@ module LLM.Workflow.Workflow where
 
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
+import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
@@ -25,20 +26,38 @@ import LLM
   )
 import LLM.Agent.ToolUtils (createToolContext, getResolvedTools)
 import LLM.Agent.Types (Agent (..), RuntimeArgs (..), ToolMap)
-import LLM.Workflow.ToolUtils (executeTool)
+import LLM.Workflow.ToolUtils (executeTool, mkSomeSubmit)
 import LLM.Workflow.Types
   ( AgentWithModels (agent, models),
+    CID (..),
     Kont (..),
     LoopContext (..),
     Pending (..),
     Prompt (Prompt, agent, history, prompt),
     PromptArgs (history, prompt),
+    SomeSubmit (ssName, ssDecode),
     Stack (..),
     Step (..),
-    ToolOutcome (ToolReply, ToolWorkflow),
+    ToolOutcome (ToolReply, ToolWorkflow, ToolYield),
     Workflow (..),
   )
-import LLM.Workflow.Utils (CatchFrame (CatchFrame), lookupHistory, mergePolicy, pendingToFinal, pendingToTurns, respToAssistantTurn, showKont, showStep, stackSize, transcriptPolicy, unwindToCatch, updateHistory)
+import LLM.Workflow.Utils
+  ( CatchFrame (CatchFrame),
+    ensureAgentTool,
+    extendToolMap,
+    lookupHistory,
+    mergePolicy,
+    pendingToFinal,
+    pendingToTurns,
+    respToAssistantTurn,
+    showKont,
+    showStep,
+    stackSize,
+    transcriptPolicy,
+    unwindPastTools,
+    unwindToCatch,
+    updateHistory,
+  )
 import Unsafe.Coerce (unsafeCoerce)
 
 -- createGenRequest :: (Text -> result) -> Agent -> ToolMap result -> RuntimeArgs -> [Turn] -> GenRequest
@@ -51,7 +70,8 @@ callLLM toolMap rt pending = do
 streamLLM :: (StreamChunk -> IO ()) -> ToolMap ToolOutcome -> RuntimeArgs -> Pending -> IO (GenerateResult ChatResponse)
 streamLLM onChunk toolMap rt pending = do
   let messages = pendingToTurns pending
-  streamTextWithFallbacks onChunk (createGenRequest ToolReply pending.prompt.agent.agent toolMap rt messages) pending.prompt.agent.models
+      toolMap' = extendToolMap pending.submitTool toolMap
+  streamTextWithFallbacks onChunk (createGenRequest ToolReply pending.prompt.agent.agent toolMap' rt messages) pending.prompt.agent.models
 
 showStreamChunk :: StreamChunk -> Text
 showStreamChunk = \case
@@ -59,6 +79,27 @@ showStreamChunk = \case
   ReasoningDelta txt -> txt
   PreambleDelta txt -> txt
   StreamToolCallChunk toolCall -> T.pack (show toolCall)
+
+submitRequiredError :: GenerateError
+submitRequiredError = unsafeCoerce ("Agent must call the submit tool to finish" :: Text)
+
+startToolRound ::
+  Pending ->
+  Maybe CID ->
+  Usage ->
+  ChatResponse ->
+  Kont o r ->
+  (Usage, Step Text, Kont Text r)
+startToolRound pending mcid uAcc resp konts =
+  let (_text, assistantTurn, toolCalls) = respToAssistantTurn resp
+      usage = fromMaybe emptyUsage resp.respUsage
+      (toolCall, toolCalls') = case toolCalls of
+        (tc : tcs) -> (tc, tcs)
+        [] -> error "startToolRound: no tool calls"
+   in ( uAcc <> usage,
+        RunTool pending assistantTurn toolCall,
+        KTool pending mcid assistantTurn toolCalls' [] toolCall (unsafeCoerce konts)
+      )
 
 callLLMO :: (GeneratableObject a) => ToolMap ToolOutcome -> RuntimeArgs -> Pending -> IO (GenerateResult (a, Usage))
 callLLMO toolMap rt pending = do
@@ -107,35 +148,62 @@ eval toolMap rt (Stack uAcc step konts) = do
           let (text, assistantTurn, toolCalls) = respToAssistantTurn resp
           case toolCalls of
             [] ->
-              let h = pendingToTurns pending ++ [assistantTurn]
-               in pure $
+              case pending.submitTool of
+                Just _ ->
+                  pure $
                     Stack
                       (uAcc <> fromMaybe emptyUsage resp.respUsage)
-                      (RunReturn $ pendingToFinal pending text assistantTurn)
-                      (maybe konts (\cid -> KUpdateHistory cid h konts) mcid)
-            (toolCall : toolCalls') ->
-              pure $
-                Stack
-                  (uAcc <> fromMaybe emptyUsage resp.respUsage)
-                  (RunTool pending assistantTurn toolCall)
-                  (KTool pending mcid assistantTurn toolCalls' [] toolCall konts)
+                      (RunThrow submitRequiredError)
+                      konts
+                Nothing ->
+                  let h = pendingToTurns pending ++ [assistantTurn]
+                   in pure $
+                        Stack
+                          (uAcc <> fromMaybe emptyUsage resp.respUsage)
+                          (RunReturn $ pendingToFinal pending text assistantTurn)
+                          (maybe konts (\cid -> KUpdateHistory cid h konts) mcid)
+            _ ->
+              let (uAcc', step', konts') = startToolRound pending mcid uAcc resp konts
+               in pure $ Stack uAcc' step' konts'
     RunTool pending _assistantTurn toolCall -> do
       let ctx = createToolContext pending.prompt.agent.agent pending.prompt.history emptyUsage rt
-          tools = getResolvedTools ToolReply pending.prompt.agent.agent toolMap rt
+          toolMap' = extendToolMap pending.submitTool toolMap
+          tools = getResolvedTools ToolReply pending.prompt.agent.agent toolMap' rt
       result <- executeTool rt.rtHooks ctx tools toolCall
       case result of
         ToolWorkflow workflow args -> do
           pure $ Stack uAcc (RunWorkflow workflow args) konts
         ToolReply text -> do
           pure $ Stack uAcc (RunReturn text) konts
+        ToolYield val ->
+          case pending.submitTool of
+            Just submit | toolCall.tcName == submit.ssName ->
+              case submit.ssDecode val of
+                Right decoded ->
+                  pure $ Stack uAcc (RunReturn (unsafeCoerce decoded)) (unwindPastTools konts)
+                Left err ->
+                  pure $ Stack uAcc (RunReturn ("Submit decode error: " <> err)) konts
+            _ ->
+              pure $ Stack uAcc (RunReturn "Unexpected ToolYield") konts
     RunWorkflow workflow i -> case workflow of
       WPrompt a mbcid ->
         let h = maybe i.history (lookupHistory konts) mbcid
-         in let pending = Pending {prompt = Prompt {agent = a, prompt = i.prompt, history = h}, toolRounds = []}
+         in let pending = Pending {prompt = Prompt {agent = a, prompt = i.prompt, history = h}, toolRounds = [], submitTool = Nothing}
              in pure $ Stack uAcc (RunPrompt pending mbcid) konts
       WObject a ->
-        let pending = Pending {prompt = Prompt {agent = a, prompt = i.prompt, history = i.history}, toolRounds = []}
+        let pending = Pending {prompt = Prompt {agent = a, prompt = i.prompt, history = i.history}, toolRounds = [], submitTool = Nothing}
          in pure $ Stack uAcc (RunObject pending) konts
+      WAgentSubmit @o name agentWithModels mbcid ->
+        let h = maybe i.history (lookupHistory konts) mbcid
+            agent' = ensureAgentTool name agentWithModels
+            submit = mkSomeSubmit (Proxy @o) name "Submit the final structured result."
+            pending =
+              Pending
+                { prompt = Prompt {agent = agent', prompt = i.prompt, history = h},
+                  toolRounds = [],
+                  submitTool = Just submit
+                }
+         in pure $ Stack uAcc (unsafeCoerce (RunPrompt pending mbcid)) konts
       WSeq workflow1 workflow2 pol ->
         pure $ Stack uAcc (RunWorkflow workflow1 i) (KSeq1 workflow2 pol konts)
       WPar workflow1 workflow2 pol ->
@@ -177,8 +245,7 @@ eval toolMap rt (Stack uAcc step konts) = do
                   Stack uAcc (RunTool pending assistantTurn toolCall') (KTool pending mcid assistantTurn toolCalls' toolResults' toolCall' k)
               [] -> do
                 let pending' = pending {toolRounds = pending.toolRounds ++ [assistantTurn, ToolTurn toolResults']}
-                 in do
-                      pure $ Stack uAcc (RunPrompt pending' mcid) k
+                 in pure $ Stack uAcc (RunPrompt pending' mcid) k
       KSeq1 workflow2 pol k ->
         let o' = transcriptPolicy pol o
          in pure $ Stack uAcc (RunWorkflow workflow2 o') k

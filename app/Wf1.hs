@@ -4,7 +4,7 @@ module Wf1
 where
 
 import Autodocodec qualified as AC
-import Data.Aeson (FromJSON)
+import Data.Aeson (FromJSON, ToJSON)
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
@@ -28,7 +28,7 @@ data LoopDecision = LoopDecision
     reason :: Text
   }
   deriving (Generic)
-  deriving (FromJSON) via (AC.Autodocodec LoopDecision)
+  deriving (FromJSON, ToJSON) via (AC.Autodocodec LoopDecision)
 
 instance AC.HasCodec LoopDecision where
   codec :: AC.JSONCodec LoopDecision
@@ -49,7 +49,7 @@ buildWf1Workflow (models, models2) =
     reviewerB = WPrompt (AgentWithModels reviewerAgentB models) Nothing
     refiner = WPrompt (AgentWithModels refinerAgent models) Nothing
     finalizer = WPrompt (AgentWithModels finalizerAgent models) Nothing
-    deciderObj = WObject (AgentWithModels deciderAgent models)
+    deciderSubmit = WAgentSubmit "submit_decision" (AgentWithModels deciderAgent models) Nothing
 
     initialDraft =
       WSeq planner reviewersCombined TranscriptFinalToPromptArgs
@@ -90,7 +90,7 @@ buildWf1Workflow (models, models2) =
     deciderWorkflow =
       WSeq
         (WLift (pure . loopContextToPromptArgs))
-        deciderObj
+        deciderSubmit
         (TranscriptPolicyFunc id)
 
     mkConditionalLoop maxIterations body decider =
@@ -116,7 +116,7 @@ loopContextToPromptArgs ctx =
             "Latest output:",
             ctx.lcOutput.text,
             "",
-            "Respond as JSON with fields: shouldContinue, reason."
+            "Call the submit_decision tool with shouldContinue and reason."
           ]
     }
 
@@ -223,10 +223,12 @@ deciderAgent =
           T.unlines
             [ "You decide whether the loop should continue.",
               "You receive loop context including current output and past outputs.",
+              "When ready, call submit_decision with shouldContinue and reason.",
               "Set shouldContinue=true only if substantial issues remain unresolved,",
               "or if the report quality is still too low for handoff.",
               "Prefer stopping once the report is coherent, deduplicated, and actionable.",
-              "Set shouldContinue=true when output is meta/process-oriented (e.g. FAILED, BLOCKED, submission issues) instead of technical."
+              "Set shouldContinue=true when output is meta/process-oriented (e.g. FAILED, BLOCKED, submission issues) instead of technical.",
+              "Do not respond with raw JSON in plain text; always use the submit_decision tool."
             ],
       agTools = [],
       agMaxToolRounds = 2,

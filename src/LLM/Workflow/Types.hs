@@ -1,8 +1,11 @@
 module LLM.Workflow.Types where
 
+import Autodocodec qualified as AC
+import Data.Aeson (FromJSON, ToJSON, Value)
 import Data.Map qualified as Map
 import Data.Text (Text)
 import Data.UUID.Types (UUID)
+import LLM (Tool (..))
 import LLM.Agent (Agent (..))
 import LLM.Core.Types
   ( ToolCall (..),
@@ -15,6 +18,13 @@ import LLM.Generate (GeneratableObject, GenerateError, ModelWithFallbacks)
 data ToolOutcome
   = ToolReply Text
   | ToolWorkflow (Workflow PromptArgs Text) PromptArgs
+  | ToolYield Value
+
+data SomeSubmit = SomeSubmit
+  { ssName :: Text,
+    ssDecode :: Value -> Either Text Value,
+    ssTool :: Tool ToolOutcome
+  }
 
 data PromptArgs = PromptArgs
   { history :: [Turn],
@@ -33,9 +43,19 @@ instance Show Prompt where
 
 data Pending = Pending
   { prompt :: Prompt,
-    toolRounds :: [Turn]
+    toolRounds :: [Turn],
+    submitTool :: Maybe SomeSubmit
   }
-  deriving (Show)
+
+instance Show Pending where
+  show Pending {prompt, toolRounds, submitTool} =
+    "Pending {prompt = "
+      <> show prompt
+      <> ", toolRounds = "
+      <> show toolRounds
+      <> ", submitTool = "
+      <> show (fmap (.ssName) submitTool)
+      <> "}"
 
 data Final = Final
   { prompt :: Maybe Prompt,
@@ -53,6 +73,7 @@ class GetCid a where
 instance GetCid (Workflow i o) where
   getCid :: forall i' o'. Workflow i' o' -> [CID]
   getCid (WPrompt _ag (Just cid)) = [cid]
+  getCid (WAgentSubmit _ _ (Just cid)) = [cid]
   getCid _ = []
 
 data TranscriptPolicy i o where
@@ -77,6 +98,12 @@ data LoopContext i o = LoopContext
 data Workflow i o where
   WPrompt :: AgentWithModels -> Maybe CID -> Workflow PromptArgs Final
   WObject :: (GeneratableObject a) => AgentWithModels -> Workflow PromptArgs a
+  WAgentSubmit ::
+    (GeneratableObject a, FromJSON a, ToJSON a, AC.HasCodec a) =>
+    Text ->
+    AgentWithModels ->
+    Maybe CID ->
+    Workflow PromptArgs a
   WSeq :: Workflow i x -> Workflow y o -> TranscriptPolicy x y -> Workflow i o
   WPar :: Workflow i x -> Workflow i y -> MergePolicy x y o -> Workflow i o
   WLift :: (i -> IO o) -> Workflow i o
