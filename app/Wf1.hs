@@ -133,7 +133,7 @@ plannerAgent =
               "Do not fabricate file contents; only report what you inspected."
             ],
       agTools = ["readdir", "directory_tree", "read_file_paginated", "grep"],
-      agMaxToolRounds = 6,
+      agMaxToolRounds = 16,
       agContextWindow = Nothing
     }
 
@@ -151,7 +151,7 @@ reviewerAgentA =
               "Do not discuss workflow status, missing submissions, blocked process, or reviewer coordination."
             ],
       agTools = ["read_file_paginated", "readdir", "grep"],
-      agMaxToolRounds = 6,
+      agMaxToolRounds = 16,
       agContextWindow = Nothing
     }
 
@@ -169,7 +169,7 @@ reviewerAgentB =
               "Do not discuss workflow status, missing submissions, blocked process, or reviewer coordination."
             ],
       agTools = ["read_file_paginated", "readdir", "grep"],
-      agMaxToolRounds = 6,
+      agMaxToolRounds = 16,
       agContextWindow = Nothing
     }
 

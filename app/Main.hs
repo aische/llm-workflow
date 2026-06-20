@@ -1,8 +1,10 @@
 module Main where
 
 import Autodocodec qualified as AC
+import Control.Monad.IO.Class (MonadIO (liftIO))
 import Data.Aeson (FromJSON)
 import Data.Functor ((<&>))
+import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -30,8 +32,8 @@ import LLM.Generate.Types
   )
 import LLM.Load.FsTools (fsTools')
 import LLM.Load.LoadModels (loadModelsOrThrow)
-import LLM.Workflow (ToolOutcome (ToolReply))
-import LLM.Workflow.ToolUtils (typedWorkflowToolToTool, workflowToolTyped)
+import LLM.Workflow (ToolOutcome (ToolReply, ToolWorkflow))
+import LLM.Workflow.ToolUtils (typedWorkflowToolToTool)
 import LLM.Workflow.Types
   ( AgentWithModels (..),
     CID (CID),
@@ -40,7 +42,7 @@ import LLM.Workflow.Types
     LoopContext (..),
     PromptArgs (..),
     TranscriptPolicy (..),
-    TypedWorkflowTool,
+    TypedWorkflowTool (TypedWorkflowTool),
     Workflow (..),
   )
 import LLM.Workflow.Workflow
@@ -63,15 +65,19 @@ main = do
   let wf1 = buildWf1Workflow (_models4, _models4)
       p1 =
         "Audit the project in the current workspace: identify correctness, safety, and maintainability risks, \
-        \with actionable recommendations and a concise final report."
+        \with actionable recommendations and a concise final report. After the audit, save a summary of the report to a file called 'audit_report.txt', then quit."
 
+  subagentUsed <- newIORef False
   toolMap <-
     fsTools' ToolReply "./user-workspace/"
       <&> addTools
         [ typedWorkflowToolToTool $
-            subagent "subagent" "Use this tool to gain expert knowledge about a topic. Provide a topic." $
-              \args _ctx ->
-                (WMap wf1 TranscriptSummaryText, PromptArgs {history = [], prompt = "Ask the expert about the topic: " <> args.prompt})
+            subagentOnce
+              subagentUsed
+              wf1
+              p1
+              "subagent"
+              "Run a complete workspace audit workflow (one shot only). Call exactly once, then use writefile."
         ]
   let orchestrator = WPrompt (AgentWithModels orchestratorAgent _models4) Nothing
   (t, usage) <- run Nothing toolMap p1 orchestrator
@@ -83,12 +89,19 @@ orchestratorAgent =
   Agent
     { agName = "orchestrator",
       agSystemPrompt =
-        Just
-          "You are a helpful assistant. You may delegate work using tools:\n\
-          \- subagent: filesystem-capable child agent for a single task",
-      agTools = ["subagent"],
-      agMaxToolRounds = 5,
-      agContextWindow = Just 3
+        Just $
+          T.unlines
+            [ "You are an orchestrator with two tools:"
+            , "- subagent: runs a complete audit workflow. Call it ONCE with the full audit request."
+            , "- writefile: saves text to a file."
+            , "Procedure:"
+            , "1. Call subagent once."
+            , "2. Call writefile once with path audit_report.txt and a concise summary of the audit."
+            , "3. Reply with a one-line confirmation. Do not call any more tools."
+            ],
+      agTools = ["subagent", "writefile"],
+      agMaxToolRounds = 3,
+      agContextWindow = Nothing
     }
 
 -- ---------------------------------------------------------------------------
@@ -123,11 +136,34 @@ newtype SubagentArgs = SubagentArgs
 instance AC.HasCodec SubagentArgs where
   codec :: AC.JSONCodec SubagentArgs
   codec =
-    AC.object "precise prompt for the subagent" $
-      SubagentArgs <$> AC.requiredField "prompt" "a precise prompt for the subagent" AC..= (\x -> x.prompt)
+    AC.object "subagent invocation" $
+      SubagentArgs
+        <$> AC.requiredField "prompt" "Brief note for logging; the full audit task is fixed." AC..= (\x -> x.prompt)
 
-subagent :: Text -> Text -> (SubagentArgs -> ToolContext -> (Workflow PromptArgs Text, PromptArgs)) -> TypedWorkflowTool ToolContext SubagentArgs
-subagent = workflowToolTyped
+subagentOnce ::
+  IORef Bool ->
+  Workflow PromptArgs Final ->
+  Text ->
+  Text ->
+  Text ->
+  TypedWorkflowTool ToolContext SubagentArgs
+subagentOnce usedRef wf auditPrompt name description =
+  TypedWorkflowTool name description False $ \_ctx _args ->
+    liftIO $ do
+      used <- readIORef usedRef
+      if used
+        then
+          pure $
+            ToolReply
+              "Subagent audit already completed. Do NOT call subagent again. \
+              \Call writefile with path audit_report.txt and a concise summary, \
+              \then reply with a short confirmation and no further tool calls."
+        else do
+          writeIORef usedRef True
+          pure $
+            ToolWorkflow
+              (WMap wf TranscriptFinalText)
+              PromptArgs {history = [], prompt = auditPrompt}
 
 printGenerateResult :: Either GenerateErrorResult GenerateTextResult -> IO ()
 printGenerateResult = \case

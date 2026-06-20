@@ -9,7 +9,7 @@ import Data.Text.IO qualified as TIO
 import LLM
   ( ChatResponse (..),
     GeneratableObject,
-    GenerateError,
+    GenerateError (..),
     GenerateErrorResult (..),
     GenerateResult,
     RuntimeArgs,
@@ -49,6 +49,7 @@ import LLM.Workflow.Utils
     mergePolicy,
     pendingToFinal,
     pendingToTurns,
+    pendingToolRoundCount,
     respToAssistantTurn,
     showKont,
     showStep,
@@ -163,8 +164,11 @@ eval toolMap rt (Stack uAcc step konts) = do
                           (RunReturn $ pendingToFinal pending text assistantTurn)
                           (maybe konts (\cid -> KUpdateHistory cid h konts) mcid)
             _ ->
-              let (uAcc', step', konts') = startToolRound pending mcid uAcc resp konts
-               in pure $ Stack uAcc' step' konts'
+              if pendingToolRoundCount pending >= pending.prompt.agent.agent.agMaxToolRounds
+                then pure $ Stack uAcc (RunThrow GErrToolExceeded) konts
+                else
+                  let (uAcc', step', konts') = startToolRound pending mcid uAcc resp konts
+                   in pure $ Stack uAcc' step' konts'
     RunTool pending _assistantTurn toolCall -> do
       let ctx = createToolContext pending.prompt.agent.agent pending.prompt.history emptyUsage rt
           toolMap' = extendToolMap pending.submitTool toolMap
@@ -245,7 +249,9 @@ eval toolMap rt (Stack uAcc step konts) = do
                   Stack uAcc (RunTool pending assistantTurn toolCall') (KTool pending mcid assistantTurn toolCalls' toolResults' toolCall' k)
               [] -> do
                 let pending' = pending {toolRounds = pending.toolRounds ++ [assistantTurn, ToolTurn toolResults']}
-                 in pure $ Stack uAcc (RunPrompt pending' mcid) k
+                 in if pendingToolRoundCount pending' >= pending'.prompt.agent.agent.agMaxToolRounds
+                      then pure $ Stack uAcc (RunThrow GErrToolExceeded) k
+                      else pure $ Stack uAcc (RunPrompt pending' mcid) k
       KSeq1 workflow2 pol k ->
         let o' = transcriptPolicy pol o
          in pure $ Stack uAcc (RunWorkflow workflow2 o') k

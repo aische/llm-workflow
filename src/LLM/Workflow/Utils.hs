@@ -42,6 +42,11 @@ pendingToFinal pending text assistantTurn =
 pendingToTurns :: Pending -> [Turn]
 pendingToTurns pending = pending.prompt.history ++ [UserTurn pending.prompt.prompt] ++ pending.toolRounds
 
+-- | Number of completed tool rounds in a pending agent step.
+-- Each round adds an assistant turn (with tool calls) and a tool-result turn.
+pendingToolRoundCount :: Pending -> Int
+pendingToolRoundCount pending = length pending.toolRounds `div` 2
+
 turnsToConversationText :: [Turn] -> Text
 turnsToConversationText turns = T.unlines (map showTurn turns)
   where
