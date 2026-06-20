@@ -133,7 +133,7 @@ plannerAgent =
               "Do not fabricate file contents; only report what you inspected."
             ],
       agTools = ["readdir", "directory_tree", "read_file_paginated", "grep"],
-      agMaxToolRounds = 16,
+      agMaxToolRounds = 30,
       agContextWindow = Nothing
     }
 
@@ -151,7 +151,7 @@ reviewerAgentA =
               "Do not discuss workflow status, missing submissions, blocked process, or reviewer coordination."
             ],
       agTools = ["read_file_paginated", "readdir", "grep"],
-      agMaxToolRounds = 16,
+      agMaxToolRounds = 30,
       agContextWindow = Nothing
     }
 
@@ -169,7 +169,7 @@ reviewerAgentB =
               "Do not discuss workflow status, missing submissions, blocked process, or reviewer coordination."
             ],
       agTools = ["read_file_paginated", "readdir", "grep"],
-      agMaxToolRounds = 16,
+      agMaxToolRounds = 30,
       agContextWindow = Nothing
     }
 
@@ -209,7 +209,7 @@ finalizerAgent =
               "Never output review-process status language such as FAILED/BLOCKED/missing submissions.",
               "If evidence is weak, state uncertainty per finding, but still provide technical hypotheses and next verification steps."
             ],
-      agTools = [],
+      agTools = ["writefile"],
       agMaxToolRounds = 3,
       agContextWindow = Nothing
     }

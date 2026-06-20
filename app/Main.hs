@@ -65,7 +65,7 @@ main = do
   let wf1 = buildWf1Workflow (_models4, _models4)
       p1 =
         "Audit the project in the current workspace: identify correctness, safety, and maintainability risks, \
-        \with actionable recommendations and a concise final report. After the audit, save a summary of the report to a file called 'audit_report.txt', then quit."
+        \with actionable recommendations and a concise final report."
 
   subagentUsed <- newIORef False
   toolMap <-
@@ -91,13 +91,14 @@ orchestratorAgent =
       agSystemPrompt =
         Just $
           T.unlines
-            [ "You are an orchestrator with two tools:"
-            , "- subagent: runs a complete audit workflow. Call it ONCE with the full audit request."
-            , "- writefile: saves text to a file."
-            , "Procedure:"
-            , "1. Call subagent once."
-            , "2. Call writefile once with path audit_report.txt and a concise summary of the audit."
-            , "3. Reply with a one-line confirmation. Do not call any more tools."
+            [ "You are an orchestrator with two tools:",
+              "- subagent: runs a complete audit workflow. Call it ONCE with the full audit request. Notice that the subagent has no writefile tool. Do not call subagent again.",
+              "- writefile: saves text to a file. use after subagent has completed.",
+              "Procedure:",
+              "1. Call subagent once.",
+              "2. Call writefile once with path audit_report.txt and a concise summary of the audit.",
+              "3. Reply with a one-line confirmation. Do not call any more tools.",
+              "4. Quit."
             ],
       agTools = ["subagent", "writefile"],
       agMaxToolRounds = 3,
