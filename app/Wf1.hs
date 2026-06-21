@@ -16,6 +16,7 @@ import LLM.Workflow
     AnyMergePolicy (..),
     BlackboardView (..),
     Cell (..),
+    HistoryMode (..),
     Label (..),
     LoopSlice (..),
     Path (..),
@@ -63,14 +64,14 @@ buildWf1Workflow (models, models2) =
     (WSeq initialDraft (mkConditionalLoop 4 loopRefiner deciderWorkflow) (seqPolicy TranscriptFinalToPromptArgs))
     (mapPolicy (TranscriptPolicyFunc (\result -> result {text = "WF1 Result\n\n" <> result.text})))
   where
-    planner = WLabel (Label "planner") $ WPrompt (AgentWithModels plannerAgent models) Nothing
-    reviewerA = WLabel (Label "reviewer-a") $ WPrompt (AgentWithModels reviewerAgentA models2) Nothing
-    reviewerB = WLabel (Label "reviewer-b") $ WPrompt (AgentWithModels reviewerAgentB models) Nothing
-    refiner = WLabel (Label "refiner") $ WPrompt (AgentWithModels refinerAgent models) Nothing
-    loopRefiner = WLabel (Label "loop-refiner") $ WPrompt (AgentWithModels refinerAgent models) Nothing
-    finalizer = WLabel (Label "finalizer") $ WPrompt (AgentWithModels finalizerAgent models) Nothing
+    planner = WLabel (Label "planner") $ WPrompt (AgentWithModels plannerAgent models) HistoryEphemeral
+    reviewerA = WLabel (Label "reviewer-a") $ WPrompt (AgentWithModels reviewerAgentA models2) HistoryEphemeral
+    reviewerB = WLabel (Label "reviewer-b") $ WPrompt (AgentWithModels reviewerAgentB models) HistoryEphemeral
+    refiner = WLabel (Label "refiner") $ WPrompt (AgentWithModels refinerAgent models) HistoryEphemeral
+    loopRefiner = WLabel (Label "loop-refiner") $ WPrompt (AgentWithModels refinerAgent models) HistoryEphemeral
+    finalizer = WLabel (Label "finalizer") $ WPrompt (AgentWithModels finalizerAgent models) HistoryEphemeral
     deciderSubmit :: Workflow PromptArgs LoopDecision
-    deciderSubmit = WLabel (Label "decider") $ WAgentSubmit "submit_decision" (AgentWithModels deciderAgent models) Nothing
+    deciderSubmit = WLabel (Label "decider") $ WAgentSubmit "submit_decision" (AgentWithModels deciderAgent models) HistoryEphemeral
 
     initialDraft =
       WSeq planner reviewersCombined (seqPolicy TranscriptFinalToPromptArgs)

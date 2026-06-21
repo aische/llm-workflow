@@ -46,8 +46,10 @@ module LLM.Workflow.Blackboard
 where
 
 import Control.Monad (foldM)
-import Data.List (find)
+import Data.List (find, sortOn)
 import Data.Map qualified as Map
+import Data.Maybe (listToMaybe)
+import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import LLM.Core.Usage (emptyUsage)
@@ -114,7 +116,6 @@ initialRunnerState input stack labelEnv =
       rsPathStack = [FrameRoot],
       rsInstIters = [],
       rsLabelEnv = labelEnv,
-      rsCurrentLeaf = Nothing,
       rsStack = stack
     }
 
@@ -206,12 +207,7 @@ innermostLoopPathFromStack =
     findLoopPath (_ : rest) = findLoopPath rest
 
 innermostLoopPath :: BlackboardView -> Maybe Path
-innermostLoopPath bv =
-  findLoopPath (reverse bv.bvPathStack)
-  where
-    findLoopPath [] = Nothing
-    findLoopPath (FrameComposite CompLoop _ path : _) = Just path
-    findLoopPath (_ : rest) = findLoopPath rest
+innermostLoopPath bv = innermostLoopPathFromStack bv.bvPathStack
 
 -- ---------------------------------------------------------------------------
 -- Query API
@@ -245,14 +241,13 @@ atBodyLabel bv lbl =
 
 globalPath :: BlackboardView -> Path -> Maybe Cell
 globalPath bv path =
-  let inst = Instance path bv.bvInstIters
-   in lookupCompletedCell bv.bvBoard inst
+  lookupCompletedCell bv.bvBoard (Instance path [])
 
 globalLabel :: BlackboardView -> Label -> Maybe Cell
 globalLabel bv lbl =
   case Map.lookup lbl bv.bvLabelEnv.leNodePath of
     Just path -> globalPath bv path
-    Nothing -> globalPath bv (Child Root lbl)
+    Nothing -> Nothing
 
 requireAt :: BlackboardView -> Path -> Maybe Cell
 requireAt = atPath
@@ -297,9 +292,36 @@ parBranch :: BlackboardView -> Side -> Maybe Cell
 parBranch bv side =
   let local = scopeRoot bv
       idx = case side of SideLeft -> 0; SideRight -> 1
-      lbl = syntheticLabel idx
-      path = Child local lbl
-   in atPath bv path
+      branchPath = Child local (syntheticLabel idx)
+   in deepestCompletedUnder bv branchPath
+
+deepestCompletedUnder :: BlackboardView -> Path -> Maybe Cell
+deepestCompletedUnder bv path =
+  fmap snd (listToMaybe (sortOn (Down . fst) candidates))
+  where
+    candidates =
+      [ (pathDepth path inst.instPath, cell)
+        | (inst, cell) <- Map.toList bv.bvBoard.bbCells,
+          inst.instIters == bv.bvInstIters,
+          isCompleted cell,
+          path `isAncestorOf` inst.instPath
+      ]
+    pathDepth :: Path -> Path -> Int
+    pathDepth ancestor candidate =
+      if ancestor == candidate
+        then 0
+        else case candidate of
+          Child parent _ -> 1 + pathDepth ancestor parent
+          Root -> 0
+
+isAncestorOf :: Path -> Path -> Bool
+isAncestorOf ancestor path = isDescendantOf path ancestor
+  where
+    isDescendantOf :: Path -> Path -> Bool
+    isDescendantOf child parent =
+      child == parent || case child of
+        Child p _ -> isDescendantOf p parent
+        Root -> False
 
 loopSlice :: BlackboardView -> Maybe LoopSlice
 loopSlice bv =

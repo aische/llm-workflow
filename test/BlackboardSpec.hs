@@ -11,6 +11,7 @@ import LLM.Workflow.BBEngine
   ( enterChildPath,
     parentPath,
     pushComposite,
+    pushParSide,
     pushScope,
     resolveChildPath,
     topPath,
@@ -31,7 +32,8 @@ spec =
       scopedAccessTests,
       wCatchParBranchTests,
       labelEnvTests,
-      pathAlignmentTests
+      pathAlignmentTests,
+      queryRegressionTests
     ]
 
 -- ---------------------------------------------------------------------------
@@ -97,11 +99,9 @@ inst :: Path -> [Int] -> Instance
 inst = Instance
 
 testRunnerState :: LabelEnv -> RunnerState (Stack ())
-testRunnerState env =
-  initialRunnerState
+testRunnerState = initialRunnerState
     (PromptArgs {history = [], prompt = ""})
     (Stack emptyUsage (RunFinish (Right ())) KEmpty)
-    env
 
 mkBoard :: Map.Map Instance Cell -> Blackboard
 mkBoard cells =
@@ -378,7 +378,29 @@ wCatchParBranchTests =
                   bvLabelEnv = emptyLabelEnv
                 }
         cellText <$> parBranch bv SideLeft @?= Just "Reviewer A failed"
-        cellText <$> parBranch bv SideRight @?= Just "review-b"
+        cellText <$> parBranch bv SideRight @?= Just "review-b",
+      testCase "labeled par branch finds deepest completed cell" $ do
+        let labeledLeft = Child reviewerAPath (Label "reviewer-a")
+            labeledRight = Child reviewerBPath (Label "reviewer-b")
+            board =
+              mkBoard $
+                Map.fromList
+                  [ (inst labeledLeft [], doneCell "labeled-a"),
+                    (inst labeledRight [], doneCell "labeled-b")
+                  ]
+            bv =
+              BlackboardView
+                { bvBoard = board,
+                  bvLocal = parPath,
+                  bvSelf = Nothing,
+                  bvPredecessor = Nothing,
+                  bvTrigger = TriggerParMerge,
+                  bvPathStack = [FrameRoot, FrameComposite CompPar (Label "par") parPath],
+                  bvInstIters = [],
+                  bvLabelEnv = emptyLabelEnv
+                }
+        cellText <$> parBranch bv SideLeft @?= Just "labeled-a"
+        cellText <$> parBranch bv SideRight @?= Just "labeled-b"
     ]
 
 -- ---------------------------------------------------------------------------
@@ -463,7 +485,7 @@ pathAlignmentTests =
                           (WLift (\_ -> pure ()))
                           (loopDecPolicy (TranscriptPolicyFunc (const True)))
                           []
-                          (loopFeedPolicy (TranscriptPolicyFunc (\_ -> PromptArgs {history = [], prompt = ""})))
+                          (loopFeedPolicy (TranscriptPolicyFunc (const PromptArgs {history = [], prompt = ""})))
                           (WLabel (Label "loop-refiner") (WLift (\_ -> pure (emptyFinal ""))))
                     )
                     (seqPolicy TranscriptFinalToPromptArgs)
@@ -478,4 +500,38 @@ pathAlignmentTests =
           Left err -> assertFailure $ show err
           Right env ->
             Map.lookup (Label "loop-refiner") env.leNodePath @?= Just expectedLoopRefiner
+    ]
+
+queryRegressionTests :: TestTree
+queryRegressionTests =
+  testGroup
+    "query regressions"
+    [ testCase "globalLabel ignores active loop instIters" $ do
+        let plannerPath = Child Root (Label "planner")
+            board = mkBoard (Map.singleton (inst plannerPath []) (doneCell "plan-text"))
+            bv =
+              BlackboardView
+                { bvBoard = board,
+                  bvLocal = loopPath,
+                  bvSelf = Nothing,
+                  bvPredecessor = Nothing,
+                  bvTrigger = TriggerLoopDecider,
+                  bvPathStack = [FrameRoot, FrameComposite CompLoop (Label "refinement-loop") loopPath],
+                  bvInstIters = [2],
+                  bvLabelEnv =
+                    emptyLabelEnv
+                      { leNodePath = Map.singleton (Label "planner") plannerPath
+                      }
+                }
+        cellText <$> globalLabel bv (Label "planner") @?= Just "plan-text",
+      testCase "WPar merge site uses par composite path" $ do
+        let env = emptyLabelEnv
+            rs0 = testRunnerState env
+            parPath' = Child Root (Label "reviewers")
+            rs1 = pushComposite CompPar (syntheticLabel 0) parPath' rs0
+            leftPath = resolveChildPath rs1 (syntheticLabel 0)
+            rs2 = pushParSide (syntheticLabel 0) SideLeft leftPath rs1
+        topPath rs2.rsPathStack @?= leftPath
+        let mergeSite = PolicySite parPath' TriggerParMerge Nothing Nothing
+        mergeSite.psLocal @?= parPath'
     ]

@@ -3,6 +3,7 @@ module LLM.Workflow.Types where
 import Autodocodec qualified as AC
 import Data.Aeson (FromJSON, ToJSON, Value)
 import Data.Map qualified as Map
+import Data.Maybe (maybeToList)
 import Data.Text (Text)
 import Data.UUID.Types (UUID)
 import LLM (Tool (..))
@@ -194,7 +195,6 @@ data RunnerState o = RunnerState
     rsPathStack :: PathStack,
     rsInstIters :: [Int],
     rsLabelEnv :: LabelEnv,
-    rsCurrentLeaf :: Maybe (Path, [Int]),
     rsStack :: o
   }
   deriving (Show)
@@ -203,6 +203,14 @@ data HistoryMode
   = HistoryEphemeral
   | HistoryPersist SlotKey
   deriving (Eq, Ord, Show)
+
+historyPersistKey :: HistoryMode -> Maybe SlotKey
+historyPersistKey HistoryEphemeral = Nothing
+historyPersistKey (HistoryPersist key) = Just key
+
+historyModeFromCid :: Maybe CID -> HistoryMode
+historyModeFromCid Nothing = HistoryEphemeral
+historyModeFromCid (Just cid) = HistoryPersist (SlotByCid cid)
 
 data SlotKey
   = SlotByCid CID
@@ -237,14 +245,17 @@ class GetCid a where
 
 instance GetCid (Workflow i o) where
   getCid :: forall i' o'. Workflow i' o' -> [CID]
-  getCid (WPrompt _ag (Just cid)) = [cid]
-  getCid (WAgentSubmit _ _ (Just cid)) = [cid]
+  getCid (WPrompt _ (HistoryPersist (SlotByCid cid))) = [cid]
+  getCid (WAgentSubmit _ _ (HistoryPersist (SlotByCid cid))) = [cid]
   getCid _ = []
 
 instance GetSlotKeys (Workflow i o) where
-  getSlotKeys (WPrompt _ (Just cid)) = [SlotByCid cid]
-  getSlotKeys (WAgentSubmit _ _ (Just cid)) = [SlotByCid cid]
-  getSlotKeys _ = []
+  getSlotKeys wf =
+    maybeToList $
+      case wf of
+        WPrompt _ mode -> historyPersistKey mode
+        WAgentSubmit _ _ mode -> historyPersistKey mode
+        _ -> Nothing
 
 data TranscriptPolicy i o where
   TranscriptPolicyFunc :: (i -> o) -> TranscriptPolicy i o
@@ -295,13 +306,13 @@ data LoopContext i o = LoopContext
   }
 
 data Workflow i o where
-  WPrompt :: AgentWithModels -> Maybe CID -> Workflow PromptArgs Final
-  WObject :: (GeneratableObject a) => AgentWithModels -> Workflow PromptArgs a
+  WPrompt :: AgentWithModels -> HistoryMode -> Workflow PromptArgs Final
+  WObject :: (GeneratableObject a, ToJSON a) => AgentWithModels -> Workflow PromptArgs a
   WAgentSubmit ::
     (GeneratableObject a, FromJSON a, ToJSON a, AC.HasCodec a) =>
     Text ->
     AgentWithModels ->
-    Maybe CID ->
+    HistoryMode ->
     Workflow PromptArgs a
   WLabel :: Label -> Workflow i o -> Workflow i o
   WSeq :: Workflow i x -> Workflow y o -> AnySeqPolicy x y -> Workflow i o
@@ -315,8 +326,8 @@ data Workflow i o where
   WCatch :: o -> Workflow i o -> Workflow i o
 
 data Step o where
-  RunPrompt :: Pending -> Maybe CID -> Step Final
-  RunObject :: (GeneratableObject a) => Pending -> Step a
+  RunPrompt :: Pending -> HistoryMode -> Step Final
+  RunObject :: (GeneratableObject a, ToJSON a) => Pending -> Step a
   RunReturn :: o -> Step o
   RunTool :: Pending -> Turn -> ToolCall -> Step Text
   RunThrow :: GenerateError -> Step o
@@ -325,17 +336,18 @@ data Step o where
 
 data Kont o r where
   KEmpty :: Kont o r
-  KTool :: Pending -> Maybe CID -> Turn -> [ToolCall] -> [ToolResult] -> ToolCall -> Kont Final r -> Kont Text r
+  KTool :: Pending -> HistoryMode -> Turn -> [ToolCall] -> [ToolResult] -> ToolCall -> Kont Final r -> Kont Text r
   KSeq1 :: Workflow y o -> AnySeqPolicy x y -> PolicySite -> Kont o r -> Kont x r
-  KPar1 :: i -> Workflow i y -> AnyMergePolicy x y o -> Kont o r -> Kont x r
+  KPar1 :: i -> Workflow i y -> AnyMergePolicy x y o -> PolicySite -> Kont o r -> Kont x r
   KPar2 :: x -> AnyMergePolicy x y o -> PolicySite -> Kont o r -> Kont y r
   KMap :: AnyMapPolicy o o' -> PolicySite -> Kont o' r -> Kont o r
-  KLoop :: Int -> Workflow i o -> AnyLoopFeedPolicy i o -> (Map.Map CID [Turn]) -> PolicySite -> Kont o r -> Kont o r
-  KLoopWhile :: Int -> Int -> Workflow i o -> AnyLoopFeedPolicy i o -> Workflow PromptArgs d -> AnyLoopDecPolicy d -> (Map.Map CID [Turn]) -> i -> [o] -> PolicySite -> Kont o r -> Kont o r
-  KLoopWhileDecision :: Int -> Int -> Workflow i o -> AnyLoopFeedPolicy i o -> Workflow PromptArgs d -> AnyLoopDecPolicy d -> (Map.Map CID [Turn]) -> i -> [o] -> o -> PolicySite -> Kont o r -> Kont d r
-  KUpdateHistory :: CID -> [Turn] -> Kont o r -> Kont o r
+  KLoop :: Int -> Workflow i o -> AnyLoopFeedPolicy i o -> (Map.Map SlotKey [Turn]) -> PolicySite -> Kont o r -> Kont o r
+  KLoopWhile :: Int -> Int -> Workflow i o -> AnyLoopFeedPolicy i o -> Workflow PromptArgs d -> AnyLoopDecPolicy d -> (Map.Map SlotKey [Turn]) -> i -> PolicySite -> Kont o r -> Kont o r
+  KLoopWhileDecision :: Int -> Int -> Workflow i o -> AnyLoopFeedPolicy i o -> Workflow PromptArgs d -> AnyLoopDecPolicy d -> (Map.Map SlotKey [Turn]) -> i -> o -> PolicySite -> Kont o r -> Kont d r
+  KUpdateHistory :: SlotKey -> [Turn] -> Kont o r -> Kont o r
   KCatch :: o -> Kont o r -> Kont o r
   KPopFrame :: Kont o r -> Kont o r
+  KPopComposite :: CompositeKind -> Kont o r -> Kont o r
   KNest :: PolicySite -> Kont o r -> Kont o r
 
 data Stack r where

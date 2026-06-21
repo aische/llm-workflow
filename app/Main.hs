@@ -38,7 +38,9 @@ import LLM.Workflow
       CID(..),
       Final(..),
       GetCid(..),
-      PromptArgs(..),
+      HistoryMode (..),
+      PromptArgs (..),
+      SlotKey (..),
       TypedWorkflowTool(..),
       Workflow(..) )
 import LLM.Workflow.ToolUtils (typedWorkflowToolToTool)
@@ -78,7 +80,7 @@ main = do
               "subagent"
               "Run a complete workspace audit workflow (one shot only). Call exactly once, then use writefile."
         ]
-  let orchestrator = WPrompt (AgentWithModels orchestratorAgent _models4) Nothing
+  let orchestrator = WPrompt (AgentWithModels orchestratorAgent _models4) HistoryEphemeral
   (t, usage) <- run Nothing toolMap p1 orchestrator
   TIO.putStrLn t
   TIO.putStrLn $ "Usage: " <> T.pack (show usage)
@@ -109,10 +111,10 @@ orchestratorAgent =
 -- ---------------------------------------------------------------------------
 
 mkAgent :: Agent -> ModelWithFallbacks -> Bool -> IO (Workflow PromptArgs Final)
-mkAgent ag models False = pure $ WPrompt (AgentWithModels ag models) Nothing
+mkAgent ag models False = pure $ WPrompt (AgentWithModels ag models) HistoryEphemeral
 mkAgent ag models True = do
   cid <- CID <$> generate
-  pure $ WPrompt (AgentWithModels ag models) (Just cid)
+  pure $ WPrompt (AgentWithModels ag models) (HistoryPersist (SlotByCid cid))
 
 mkLoop :: (GetCid x) => Int -> AnyLoopFeedPolicy i o -> [x] -> Workflow i o -> Workflow i o
 mkLoop n policy scope wf = WLoop n wf policy cids

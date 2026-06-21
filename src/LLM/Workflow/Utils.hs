@@ -20,7 +20,7 @@ import LLM.Workflow.Types
     AnyMergePolicy (..),
     AnySeqPolicy (..),
     BlackboardView (..),
-    CID,
+    SlotKey (..),
     Final (..),
     Kont (..),
     LoopSlice (..),
@@ -148,74 +148,77 @@ adaptParPolicy pol _ = mergePolicy pol
 
 -- * Lookup and update history functions ------------------------------------
 
-lookupHistory :: Kont o r -> CID -> [Turn]
-lookupHistory kont cid = case kont of
+lookupHistory :: Kont o r -> SlotKey -> [Turn]
+lookupHistory kont key = case kont of
   KEmpty -> []
-  KTool _pending _mcid _assistantTurn _toolCalls _toolResults _toolCall k -> lookupHistory k cid
-  KSeq1 _workflow2 _pol _site k -> lookupHistory k cid
-  KPar1 _i _workflow2 _mergePolicy k -> lookupHistory k cid
-  KPar2 _x _mergePolicy _site k -> lookupHistory k cid
-  KMap _pol _site k -> lookupHistory k cid
-  KUpdateHistory _cid _history k -> lookupHistory k cid
-  KLoop _n _workflow _policy cids _site k ->
-    case Map.lookup cid cids of
-      Nothing -> lookupHistory k cid
+  KTool _pending _mode _assistantTurn _toolCalls _toolResults _toolCall k -> lookupHistory k key
+  KSeq1 _workflow2 _pol _site k -> lookupHistory k key
+  KPar1 _i _workflow2 _mergePolicy _site k -> lookupHistory k key
+  KPar2 _x _mergePolicy _site k -> lookupHistory k key
+  KMap _pol _site k -> lookupHistory k key
+  KUpdateHistory _slot _history k -> lookupHistory k key
+  KLoop _n _workflow _policy slots _site k ->
+    case Map.lookup key slots of
+      Nothing -> lookupHistory k key
       Just history -> history
-  KLoopWhile _maxIterations _iteration _workflow _policy _decider _decisionPolicy cids _currentInput _outputsRev _site k ->
-    case Map.lookup cid cids of
-      Nothing -> lookupHistory k cid
+  KLoopWhile _maxIterations _iteration _workflow _policy _decider _decisionPolicy slots _currentInput _site k ->
+    case Map.lookup key slots of
+      Nothing -> lookupHistory k key
       Just history -> history
-  KLoopWhileDecision _maxIterations _iteration _workflow _policy _decider _decisionPolicy cids _nextInput _outputsRev _lastOutput _site k ->
-    case Map.lookup cid cids of
-      Nothing -> lookupHistory k cid
+  KLoopWhileDecision _maxIterations _iteration _workflow _policy _decider _decisionPolicy slots _nextInput _lastOutput _site k ->
+    case Map.lookup key slots of
+      Nothing -> lookupHistory k key
       Just history -> history
-  KPopFrame k -> lookupHistory k cid
-  KNest _site k -> lookupHistory k cid
-  KCatch _o k -> lookupHistory k cid
+  KPopFrame k -> lookupHistory k key
+  KPopComposite _kind k -> lookupHistory k key
+  KNest _site k -> lookupHistory k key
+  KCatch _o k -> lookupHistory k key
 
-updateHistory :: CID -> [Turn] -> Kont o r -> Kont o r
-updateHistory cid history kont = case kont of
+updateHistory :: SlotKey -> [Turn] -> Kont o r -> Kont o r
+updateHistory key history kont = case kont of
   KEmpty -> KEmpty
-  KTool pending mcid assistantTurn toolCalls toolResults toolCall k ->
-    KTool pending mcid assistantTurn toolCalls toolResults toolCall (updateHistory cid history k)
+  KTool pending mode assistantTurn toolCalls toolResults toolCall k ->
+    KTool pending mode assistantTurn toolCalls toolResults toolCall (updateHistory key history k)
   KSeq1 workflow2 pol site k ->
-    KSeq1 workflow2 pol site (updateHistory cid history k)
-  KPar1 i workflow2 pol k ->
-    KPar1 i workflow2 pol (updateHistory cid history k)
+    KSeq1 workflow2 pol site (updateHistory key history k)
+  KPar1 i workflow2 pol site k ->
+    KPar1 i workflow2 pol site (updateHistory key history k)
   KPar2 x pol site k ->
-    KPar2 x pol site (updateHistory cid history k)
+    KPar2 x pol site (updateHistory key history k)
   KMap pol site k ->
-    KMap pol site (updateHistory cid history k)
-  KLoop n workflow pol cids site k -> case Map.lookup cid cids of
-    Nothing -> KLoop n workflow pol cids site (updateHistory cid history k)
-    Just _h -> KLoop n workflow pol (Map.insert cid history cids) site k
-  KLoopWhile maxIterations iteration workflow pol decider decisionPolicy cids currentInput outputsRev site k -> case Map.lookup cid cids of
-    Nothing -> KLoopWhile maxIterations iteration workflow pol decider decisionPolicy cids currentInput outputsRev site (updateHistory cid history k)
-    Just _h -> KLoopWhile maxIterations iteration workflow pol decider decisionPolicy (Map.insert cid history cids) currentInput outputsRev site k
-  KLoopWhileDecision maxIterations iteration workflow pol decider decisionPolicy cids nextInput outputsRev lastOutput site k -> case Map.lookup cid cids of
-    Nothing -> KLoopWhileDecision maxIterations iteration workflow pol decider decisionPolicy cids nextInput outputsRev lastOutput site (updateHistory cid history k)
-    Just _h -> KLoopWhileDecision maxIterations iteration workflow pol decider decisionPolicy (Map.insert cid history cids) nextInput outputsRev lastOutput site k
-  KUpdateHistory c h k ->
-    KUpdateHistory c h (updateHistory cid history k)
-  KPopFrame k -> KPopFrame (updateHistory cid history k)
-  KNest site k -> KNest site (updateHistory cid history k)
-  KCatch o k -> KCatch o (updateHistory cid history k)
+    KMap pol site (updateHistory key history k)
+  KLoop n workflow pol slots site k -> case Map.lookup key slots of
+    Nothing -> KLoop n workflow pol slots site (updateHistory key history k)
+    Just _h -> KLoop n workflow pol (Map.insert key history slots) site k
+  KLoopWhile maxIterations iteration workflow pol decider decisionPolicy slots currentInput site k -> case Map.lookup key slots of
+    Nothing -> KLoopWhile maxIterations iteration workflow pol decider decisionPolicy slots currentInput site (updateHistory key history k)
+    Just _h -> KLoopWhile maxIterations iteration workflow pol decider decisionPolicy (Map.insert key history slots) currentInput site k
+  KLoopWhileDecision maxIterations iteration workflow pol decider decisionPolicy slots nextInput lastOutput site k -> case Map.lookup key slots of
+    Nothing -> KLoopWhileDecision maxIterations iteration workflow pol decider decisionPolicy slots nextInput lastOutput site (updateHistory key history k)
+    Just _h -> KLoopWhileDecision maxIterations iteration workflow pol decider decisionPolicy (Map.insert key history slots) nextInput lastOutput site k
+  KUpdateHistory slot h k ->
+    KUpdateHistory slot h (updateHistory key history k)
+  KPopFrame k -> KPopFrame (updateHistory key history k)
+  KPopComposite kind k -> KPopComposite kind (updateHistory key history k)
+  KNest site k -> KNest site (updateHistory key history k)
+  KCatch o k -> KCatch o (updateHistory key history k)
 
 stackSize :: Kont o r -> Int
 stackSize kont = case kont of
   KEmpty -> 0
-  KTool _pending _mcid _assistantTurn _toolCalls _toolResults _toolCall k -> 1 + stackSize k
+  KTool _pending _mode _assistantTurn _toolCalls _toolResults _toolCall k -> 1 + stackSize k
   KSeq1 _workflow2 _pol _site k -> 1 + stackSize k
-  KPar1 _i _workflow2 _mergePolicy k -> 1 + stackSize k
+  KPar1 _i _workflow2 _mergePolicy _site k -> 1 + stackSize k
   KPar2 _x _mergePolicy _site k -> 1 + stackSize k
   KMap _pol _site k -> 1 + stackSize k
-  KLoop _n _workflow _policy _cids _site k -> 1 + stackSize k
-  KUpdateHistory _cid _history k -> 1 + stackSize k
+  KLoop _n _workflow _policy _slots _site k -> 1 + stackSize k
+  KUpdateHistory _slot _history k -> 1 + stackSize k
   KPopFrame k -> 1 + stackSize k
+  KPopComposite _kind k -> 1 + stackSize k
   KNest _site k -> 1 + stackSize k
   KCatch _o k -> 1 + stackSize k
-  KLoopWhile _maxIterations _iteration _workflow _policy _decider _decisionPolicy _cids _currentInput _outputsRev _site k -> 1 + stackSize k
-  KLoopWhileDecision _maxIterations _iteration _workflow _policy _decider _decisionPolicy _cids _nextInput _outputsRev _lastOutput _site k -> 1 + stackSize k
+  KLoopWhile _maxIterations _iteration _workflow _policy _decider _decisionPolicy _slots _currentInput _site k -> 1 + stackSize k
+  KLoopWhileDecision _maxIterations _iteration _workflow _policy _decider _decisionPolicy _slots _nextInput _lastOutput _site k -> 1 + stackSize k
 
 data CatchFrame r where
   CatchFrame :: o -> Kont o r -> CatchFrame r
@@ -223,22 +226,23 @@ data CatchFrame r where
 unwindToCatch :: Kont o r -> Maybe (CatchFrame r)
 unwindToCatch kont = case kont of
   KEmpty -> Nothing
-  KTool _pending _mcid _assistantTurn _toolCalls _toolResults _toolCall k -> unwindToCatch k
+  KTool _pending _mode _assistantTurn _toolCalls _toolResults _toolCall k -> unwindToCatch k
   KSeq1 _workflow2 _pol _site k -> unwindToCatch k
-  KPar1 _i _workflow2 _mergePolicy k -> unwindToCatch k
+  KPar1 _i _workflow2 _mergePolicy _site k -> unwindToCatch k
   KPar2 _x _mergePolicy _site k -> unwindToCatch k
   KMap _pol _site k -> unwindToCatch k
-  KLoop _n _workflow _policy _cids _site k -> unwindToCatch k
-  KLoopWhile _maxIterations _iteration _workflow _policy _decider _decisionPolicy _cids _currentInput _outputsRev _site k -> unwindToCatch k
-  KLoopWhileDecision _maxIterations _iteration _workflow _policy _decider _decisionPolicy _cids _nextInput _outputsRev _lastOutput _site k -> unwindToCatch k
-  KUpdateHistory _cid _history k -> unwindToCatch k
+  KLoop _n _workflow _policy _slots _site k -> unwindToCatch k
+  KLoopWhile _maxIterations _iteration _workflow _policy _decider _decisionPolicy _slots _currentInput _site k -> unwindToCatch k
+  KLoopWhileDecision _maxIterations _iteration _workflow _policy _decider _decisionPolicy _slots _nextInput _lastOutput _site k -> unwindToCatch k
+  KUpdateHistory _slot _history k -> unwindToCatch k
   KPopFrame k -> unwindToCatch k
+  KPopComposite _kind k -> unwindToCatch k
   KNest _site k -> unwindToCatch k
   KCatch o k -> Just (CatchFrame o k)
 
 unwindPastTools :: Kont o r -> Kont o r
 unwindPastTools kont = case kont of
-  KTool _pending _mcid _assistantTurn _toolCalls _toolResults _toolCall k ->
+  KTool _pending _mode _assistantTurn _toolCalls _toolResults _toolCall k ->
     unwindPastTools (unsafeCoerce k)
   other -> other
 
@@ -261,7 +265,7 @@ showAgent pending = pending.prompt.agent.agent.agName
 showStep :: Step o -> Text
 showStep step =
   case step of
-    RunPrompt pending _mcid -> "RunPrompt " <> showAgent pending
+    RunPrompt pending _mode -> "RunPrompt " <> showAgent pending
     RunObject pending -> "RunObject " <> showAgent pending
     RunReturn _o -> "RunReturn"
     RunTool _pending _assistantTurn toolCall -> "RunTool " <> toolCall.tcName
@@ -273,17 +277,18 @@ showKont :: Kont o r -> [Text]
 showKont kont =
   case kont of
     KEmpty -> []
-    KTool pending _mcid _assistantTurn _toolCalls _toolResults toolCall k -> "KTool " <> toolCall.tcName <> " (" <> showAgent pending <> ")" : showKont k
+    KTool pending _mode _assistantTurn _toolCalls _toolResults toolCall k -> "KTool " <> toolCall.tcName <> " (" <> showAgent pending <> ")" : showKont k
     KSeq1 _workflow2 _pol _site k -> "KSeq1" : showKont k
-    KPar1 _i _workflow2 _mergePolicy k -> "KPar1" : showKont k
+    KPar1 _i _workflow2 _mergePolicy _site k -> "KPar1" : showKont k
     KPar2 _x _mergePolicy _site k -> "KPar2" : showKont k
     KMap _pol _site k -> "KMap" : showKont k
-    KLoopWhile _maxIterations iteration _workflow _policy _decider _decisionPolicy _cids _currentInput _outputsRev _site k ->
+    KLoopWhile _maxIterations iteration _workflow _policy _decider _decisionPolicy _slots _currentInput _site k ->
       "KLoopWhile " <> T.pack (show iteration) <> "/" <> T.pack (show _maxIterations) : showKont k
-    KLoopWhileDecision _maxIterations iteration _workflow _policy _decider _decisionPolicy _cids _nextInput _outputsRev _lastOutput _site k ->
+    KLoopWhileDecision _maxIterations iteration _workflow _policy _decider _decisionPolicy _slots _nextInput _lastOutput _site k ->
       "KLoopWhileDecision " <> T.pack (show iteration) <> "/" <> T.pack (show _maxIterations) : showKont k
-    KLoop _n _workflow _policy _cids _site k -> "KLoop " <> T.pack (show _n) : showKont k
-    KUpdateHistory cid _history k -> "KUpdateHistory " <> T.pack (show cid) : showKont k
+    KLoop _n _workflow _policy _slots _site k -> "KLoop " <> T.pack (show _n) : showKont k
+    KUpdateHistory slot _history k -> "KUpdateHistory " <> T.pack (show slot) : showKont k
     KPopFrame k -> "KPopFrame" : showKont k
+    KPopComposite kind k -> "KPopComposite " <> T.pack (show kind) : showKont k
     KNest _site k -> "KNest" : showKont k
     KCatch _o k -> "KCatch" : showKont k

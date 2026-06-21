@@ -5,6 +5,8 @@ module LLM.Workflow.BBEngine
     pushLeaf,
     pushParSide,
     popPathFrame,
+    popCompositeFrame,
+    popParFrames,
     startLeafCell,
     completeLeafCell,
     completeObjectCell,
@@ -27,6 +29,7 @@ module LLM.Workflow.BBEngine
     resolveChildPath,
     resolveSidePath,
     enterChildPath,
+    currentLeafCoords,
   )
 where
 
@@ -39,6 +42,7 @@ import LLM.Generate (GenerateError)
 import LLM.Workflow.Blackboard
   ( appendLoopOutput,
     emptyCell,
+    emptyLoopSlice,
     labelEnvResolve,
     syntheticLabel,
     updateSlot,
@@ -104,12 +108,34 @@ popPathFrame :: RunnerState a -> RunnerState a
 popPathFrame rs =
   rs {rsPathStack = drop 1 rs.rsPathStack}
 
+popCompositeFrame :: CompositeKind -> RunnerState a -> RunnerState a
+popCompositeFrame kind rs =
+  case rs.rsPathStack of
+    FrameComposite k _ _ : rest | k == kind -> rs {rsPathStack = rest}
+    _ -> rs
+
+popParFrames :: RunnerState a -> RunnerState a
+popParFrames =
+  popCompositeFrame CompPar . popParSideFrame . popParSideFrame
+  where
+    popParSideFrame rs =
+      case rs.rsPathStack of
+        FrameParSide {} : rest -> rs {rsPathStack = rest}
+        _ -> rs
+
 exitLoopScope :: RunnerState a -> RunnerState a
 exitLoopScope rs =
-  popPathFrame rs {rsInstIters = drop 1 rs.rsInstIters}
+  popCompositeFrame CompLoop $
+    popPathFrame rs {rsInstIters = drop 1 rs.rsInstIters}
+
+currentLeafCoords :: RunnerState a -> Maybe (Path, [Int])
+currentLeafCoords rs =
+  case rs.rsBlackboard.bbCurrent of
+    Nothing -> Nothing
+    Just inst -> Just (inst.instPath, inst.instIters)
 
 enterChildPath :: RunnerState a -> Label -> Path
-enterChildPath rs = resolveChildPath rs
+enterChildPath = resolveChildPath
 
 startLeafCell :: Path -> [Int] -> Maybe Text -> RunnerState a -> RunnerState a
 startLeafCell path iters agentName rs =
@@ -121,7 +147,7 @@ startLeafCell path iters agentName rs =
           { bbCells = Map.insert inst cell bb.bbCells,
             bbCurrent = Just inst
           }
-   in rs {rsBlackboard = bb', rsCurrentLeaf = Just (path, iters)}
+   in rs {rsBlackboard = bb'}
 
 updateRunningHistory :: Path -> [Int] -> [Turn] -> RunnerState a -> RunnerState a
 updateRunningHistory path iters turns rs =
@@ -149,7 +175,7 @@ completeLeafCell path iters final u turns rs =
             bbCurrent = Nothing,
             bbUsage = bb.bbUsage <> u
           }
-   in popPathFrame rs {rsBlackboard = bb', rsCurrentLeaf = Nothing}
+   in popPathFrame rs {rsBlackboard = bb'}
 
 completeObjectCell :: (ToJSON v) => Path -> [Int] -> v -> Usage -> RunnerState s -> RunnerState s
 completeObjectCell path iters value u rs =
@@ -165,7 +191,7 @@ completeObjectCell path iters value u rs =
             bbCurrent = Nothing,
             bbUsage = bb.bbUsage <> u
           }
-   in popPathFrame rs {rsBlackboard = bb', rsCurrentLeaf = Nothing}
+   in popPathFrame rs {rsBlackboard = bb'}
 
 failLeafCell :: Path -> [Int] -> GenerateError -> RunnerState a -> RunnerState a
 failLeafCell path iters err rs =
@@ -173,7 +199,7 @@ failLeafCell path iters err rs =
       cell = (emptyCell {cellStatus = CellFailed, cellError = Just err})
       bb = rs.rsBlackboard
       bb' = bb {bbCells = Map.insert inst cell bb.bbCells, bbCurrent = Nothing}
-   in popPathFrame rs {rsBlackboard = bb', rsCurrentLeaf = Nothing}
+   in popPathFrame rs {rsBlackboard = bb'}
 
 catchLeafCell :: Path -> [Int] -> Final -> GenerateError -> RunnerState a -> RunnerState a
 catchLeafCell path iters fallback err rs =
@@ -184,26 +210,14 @@ catchLeafCell path iters fallback err rs =
           }
       bb = rs.rsBlackboard
       bb' = bb {bbCells = Map.insert inst cell bb.bbCells, bbCurrent = Nothing}
-   in popPathFrame rs {rsBlackboard = bb', rsCurrentLeaf = Nothing}
+   in popPathFrame rs {rsBlackboard = bb'}
 
 nodeOutputFromFinal :: Final -> NodeOutput
 nodeOutputFromFinal = OutFinal
 
 initLoopSliceAt :: Path -> LoopKind -> Int -> PromptArgs -> [SlotKey] -> RunnerState a -> RunnerState a
 initLoopSliceAt path kind maxIter input scope rs =
-  let slice =
-        LoopSlice
-          { lsKind = kind,
-            lsIteration = 1,
-            lsMax = maxIter,
-            lsSlots = Map.empty,
-            lsPersistScope = scope,
-            lsOutputs = [],
-            lsLatestOutput = Nothing,
-            lsInput = input,
-            lsNextInput = Nothing,
-            lsDecisions = []
-          }
+  let slice = (emptyLoopSlice kind maxIter input) {lsPersistScope = scope}
       bb = rs.rsBlackboard
    in rs {rsBlackboard = bb {bbSlices = Map.insert path slice bb.bbSlices}}
 
@@ -215,16 +229,13 @@ updateLoopSliceAt path f rs =
       rs {rsBlackboard = rs.rsBlackboard {bbSlices = Map.insert path (f slice) rs.rsBlackboard.bbSlices}}
 
 bumpLoopIteration :: Path -> Int -> RunnerState a -> RunnerState a
-bumpLoopIteration path iter rs =
-  updateLoopSliceAt path (\s -> s {lsIteration = iter}) rs
+bumpLoopIteration path iter = updateLoopSliceAt path (\s -> s {lsIteration = iter})
 
 setLoopNextInput :: Path -> PromptArgs -> RunnerState a -> RunnerState a
-setLoopNextInput path input rs =
-  updateLoopSliceAt path (\s -> s {lsNextInput = Just input}) rs
+setLoopNextInput path input = updateLoopSliceAt path (\s -> s {lsNextInput = Just input})
 
 appendLoopDecision :: Path -> Bool -> RunnerState a -> RunnerState a
-appendLoopDecision path decision rs =
-  updateLoopSliceAt path (\s -> s {lsDecisions = s.lsDecisions ++ [decision]}) rs
+appendLoopDecision path decision = updateLoopSliceAt path (\s -> s {lsDecisions = s.lsDecisions ++ [decision]})
 
 appendBodyOutput :: Path -> NodeOutput -> RunnerState a -> RunnerState a
 appendBodyOutput loopPath out rs =
