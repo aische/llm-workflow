@@ -169,6 +169,8 @@ lookupHistory kont cid = case kont of
     case Map.lookup cid cids of
       Nothing -> lookupHistory k cid
       Just history -> history
+  KPopFrame k -> lookupHistory k cid
+  KNest _site k -> lookupHistory k cid
   KCatch _o k -> lookupHistory k cid
 
 updateHistory :: CID -> [Turn] -> Kont o r -> Kont o r
@@ -195,6 +197,8 @@ updateHistory cid history kont = case kont of
     Just _h -> KLoopWhileDecision maxIterations iteration workflow pol decider decisionPolicy (Map.insert cid history cids) nextInput outputsRev lastOutput site k
   KUpdateHistory c h k ->
     KUpdateHistory c h (updateHistory cid history k)
+  KPopFrame k -> KPopFrame (updateHistory cid history k)
+  KNest site k -> KNest site (updateHistory cid history k)
   KCatch o k -> KCatch o (updateHistory cid history k)
 
 stackSize :: Kont o r -> Int
@@ -207,6 +211,8 @@ stackSize kont = case kont of
   KMap _pol _site k -> 1 + stackSize k
   KLoop _n _workflow _policy _cids _site k -> 1 + stackSize k
   KUpdateHistory _cid _history k -> 1 + stackSize k
+  KPopFrame k -> 1 + stackSize k
+  KNest _site k -> 1 + stackSize k
   KCatch _o k -> 1 + stackSize k
   KLoopWhile _maxIterations _iteration _workflow _policy _decider _decisionPolicy _cids _currentInput _outputsRev _site k -> 1 + stackSize k
   KLoopWhileDecision _maxIterations _iteration _workflow _policy _decider _decisionPolicy _cids _nextInput _outputsRev _lastOutput _site k -> 1 + stackSize k
@@ -226,6 +232,8 @@ unwindToCatch kont = case kont of
   KLoopWhile _maxIterations _iteration _workflow _policy _decider _decisionPolicy _cids _currentInput _outputsRev _site k -> unwindToCatch k
   KLoopWhileDecision _maxIterations _iteration _workflow _policy _decider _decisionPolicy _cids _nextInput _outputsRev _lastOutput _site k -> unwindToCatch k
   KUpdateHistory _cid _history k -> unwindToCatch k
+  KPopFrame k -> unwindToCatch k
+  KNest _site k -> unwindToCatch k
   KCatch o k -> Just (CatchFrame o k)
 
 unwindPastTools :: Kont o r -> Kont o r
@@ -276,4 +284,6 @@ showKont kont =
       "KLoopWhileDecision " <> T.pack (show iteration) <> "/" <> T.pack (show _maxIterations) : showKont k
     KLoop _n _workflow _policy _cids _site k -> "KLoop " <> T.pack (show _n) : showKont k
     KUpdateHistory cid _history k -> "KUpdateHistory " <> T.pack (show cid) : showKont k
+    KPopFrame k -> "KPopFrame" : showKont k
+    KNest _site k -> "KNest" : showKont k
     KCatch _o k -> "KCatch" : showKont k

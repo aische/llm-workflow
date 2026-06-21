@@ -60,13 +60,14 @@ instance AC.HasCodec LoopDecision where
 buildWf1Workflow :: (ModelWithFallbacks, ModelWithFallbacks) -> Workflow PromptArgs Final
 buildWf1Workflow (models, models2) =
   WMap
-    (WSeq initialDraft (mkConditionalLoop 4 refiner deciderWorkflow) (seqPolicy TranscriptFinalToPromptArgs))
+    (WSeq initialDraft (mkConditionalLoop 4 loopRefiner deciderWorkflow) (seqPolicy TranscriptFinalToPromptArgs))
     (mapPolicy (TranscriptPolicyFunc (\result -> result {text = "WF1 Result\n\n" <> result.text})))
   where
     planner = WLabel (Label "planner") $ WPrompt (AgentWithModels plannerAgent models) Nothing
     reviewerA = WLabel (Label "reviewer-a") $ WPrompt (AgentWithModels reviewerAgentA models2) Nothing
     reviewerB = WLabel (Label "reviewer-b") $ WPrompt (AgentWithModels reviewerAgentB models) Nothing
     refiner = WLabel (Label "refiner") $ WPrompt (AgentWithModels refinerAgent models) Nothing
+    loopRefiner = WLabel (Label "loop-refiner") $ WPrompt (AgentWithModels refinerAgent models) Nothing
     finalizer = WLabel (Label "finalizer") $ WPrompt (AgentWithModels finalizerAgent models) Nothing
     deciderSubmit :: Workflow PromptArgs LoopDecision
     deciderSubmit = WLabel (Label "decider") $ WAgentSubmit "submit_decision" (AgentWithModels deciderAgent models) Nothing
@@ -133,8 +134,8 @@ buildWf1Workflow (models, models2) =
 refinerBodyPath :: BlackboardView -> Path
 refinerBodyPath bv =
   case innermostLoopPath bv of
-    Nothing -> Child Root (Label "refiner")
-    Just loopP -> Child (loopBodyPath loopP) (Label "refiner")
+    Nothing -> Child Root (Label "loop-refiner")
+    Just loopP -> Child (loopBodyPath loopP) (Label "loop-refiner")
 
 maybeCellText :: Maybe Cell -> Text
 maybeCellText = maybe "" cellText
@@ -152,7 +153,7 @@ wf1DeciderPrompt bv =
         concatMap
           (\(n, cell) -> ["Iteration " <> T.pack (show n) <> ":", cellText cell, ""])
           (zip ([1 :: Int ..] :: [Int]) (priorIterations bv refinerPath))
-      currentRef = maybeCellText (atBodyLabel bv (Label "refiner"))
+      currentRef = maybeCellText (atBodyLabel bv (Label "loop-refiner"))
    in PromptArgs
         { history = [],
           prompt =
@@ -226,7 +227,7 @@ wf1DeciderContinue bv slice (LoopDecision wants _) =
   (slice.lsIteration < slice.lsMax)
     && ( let refinerPath = refinerBodyPath bv
              priorTexts = map cellText (priorIterations bv refinerPath)
-             currentText = maybeCellText (atBodyLabel bv (Label "refiner"))
+             currentText = maybeCellText (atBodyLabel bv (Label "loop-refiner"))
              regressing = not (null priorTexts) && currentText == last priorTexts
              metaFailure =
                any
@@ -242,7 +243,7 @@ wf1FinalizerInput bv =
       reviewB = maybeCellText (globalLabel bv (Label "reviewer-b"))
       refinerPath = refinerBodyPath bv
       priorRefs = map cellText (priorIterations bv refinerPath)
-      latestRef = maybeCellText (atBodyLabel bv (Label "refiner"))
+      latestRef = maybeCellText (atBodyLabel bv (Label "loop-refiner"))
       allRefs =
         case priorRefs of
           [] -> [latestRef]

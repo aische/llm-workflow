@@ -182,6 +182,7 @@ data Side = SideLeft | SideRight
 data PathFrame
   = FrameRoot
   | FrameComposite CompositeKind Label Path
+  | FrameScope Label Path
   | FrameLeaf Label Path
   | FrameParSide Label Side Path
   deriving (Eq, Show)
@@ -334,6 +335,8 @@ data Kont o r where
   KLoopWhileDecision :: Int -> Int -> Workflow i o -> AnyLoopFeedPolicy i o -> Workflow PromptArgs d -> AnyLoopDecPolicy d -> (Map.Map CID [Turn]) -> i -> [o] -> o -> PolicySite -> Kont o r -> Kont d r
   KUpdateHistory :: CID -> [Turn] -> Kont o r -> Kont o r
   KCatch :: o -> Kont o r -> Kont o r
+  KPopFrame :: Kont o r -> Kont o r
+  KNest :: PolicySite -> Kont o r -> Kont o r
 
 data Stack r where
   Stack :: Usage -> (Step o) -> (Kont o r) -> Stack r

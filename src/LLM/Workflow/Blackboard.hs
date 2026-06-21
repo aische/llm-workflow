@@ -48,7 +48,6 @@ where
 import Control.Monad (foldM)
 import Data.List (find)
 import Data.Map qualified as Map
-import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import LLM.Core.Usage (emptyUsage)
@@ -191,6 +190,7 @@ currentPath :: PathStack -> Maybe Path
 currentPath [] = Nothing
 currentPath (FrameRoot : _) = Just Root
 currentPath (FrameComposite _ _ path : _) = Just path
+currentPath (FrameScope _ path : _) = Just path
 currentPath (FrameLeaf _ path : _) = Just path
 currentPath (FrameParSide _ _ path : _) = Just path
 
@@ -254,9 +254,8 @@ globalLabel bv lbl =
     Just path -> globalPath bv path
     Nothing -> globalPath bv (Child Root lbl)
 
-requireAt :: BlackboardView -> Path -> Cell
-requireAt bv path =
-  fromMaybe (error $ "requireAt: no completed cell at " <> show path) (atPath bv path)
+requireAt :: BlackboardView -> Path -> Maybe Cell
+requireAt = atPath
 
 cellFinal :: Cell -> Final
 cellFinal cell =
@@ -363,6 +362,7 @@ showPathStack stack =
     showPathFrame = \case
       FrameRoot -> "Root"
       FrameComposite kind lbl path -> "Composite " <> T.pack (show kind) <> " " <> lbl.unLabel <> " @ " <> showPath path
+      FrameScope lbl path -> "Scope " <> lbl.unLabel <> " @ " <> showPath path
       FrameLeaf lbl path -> "Leaf " <> lbl.unLabel <> " @ " <> showPath path
       FrameParSide lbl side path -> "ParSide " <> lbl.unLabel <> " " <> T.pack (show side) <> " @ " <> showPath path
 
@@ -432,17 +432,17 @@ buildLabelEnvAt parent wf env = case wf of
 
 buildLabeledAt :: Path -> Label -> Workflow i o -> LabelEnv -> Either LabelEnvError LabelEnv
 buildLabeledAt parent lbl inner env =
-  case Map.lookup lbl env.leNodePath of
-    Just existing | existing /= parent ->
-      Left (DuplicateLabel parent lbl)
-    _ -> do
-      let childPath = Child parent lbl
-          env' =
-            env
-              { leChildPaths = Map.insert (parent, lbl) childPath env.leChildPaths,
-                leNodePath = Map.insert lbl childPath env.leNodePath
-              }
-      buildLabelEnvAt childPath inner env'
+  let childPath = Child parent lbl
+   in case Map.lookup lbl env.leNodePath of
+        Just existing | existing /= childPath ->
+          Left (DuplicateLabel parent lbl)
+        _ -> do
+          let env' =
+                env
+                  { leChildPaths = Map.insert (parent, lbl) childPath env.leChildPaths,
+                    leNodePath = Map.insert lbl childPath env.leNodePath
+                  }
+          buildLabelEnvAt childPath inner env'
 
 buildComposite ::
   Path ->

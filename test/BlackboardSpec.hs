@@ -6,7 +6,17 @@ import Data.Text (Text)
 import LLM (Agent (..))
 import LLM.Core.Types (Turn (UserTurn))
 import LLM.Workflow.Blackboard
-import LLM.Workflow.Utils (loopDecPolicy, loopFeedPolicy)
+import LLM.Core.Usage (emptyUsage)
+import LLM.Workflow.BBEngine
+  ( enterChildPath,
+    parentPath,
+    pushComposite,
+    pushScope,
+    resolveChildPath,
+    topPath,
+  )
+import LLM.Workflow (emptyFinal)
+import LLM.Workflow.Utils (loopDecPolicy, loopFeedPolicy, mapPolicy, seqPolicy)
 import Test.Tasty
 import Test.Tasty.HUnit (assertFailure, testCase, (@?=))
 
@@ -20,7 +30,8 @@ spec =
       slotPersistenceTests,
       scopedAccessTests,
       wCatchParBranchTests,
-      labelEnvTests
+      labelEnvTests,
+      pathAlignmentTests
     ]
 
 -- ---------------------------------------------------------------------------
@@ -84,6 +95,13 @@ reviewerBPath = Child parPath (syntheticLabel 1)
 
 inst :: Path -> [Int] -> Instance
 inst = Instance
+
+testRunnerState :: LabelEnv -> RunnerState (Stack ())
+testRunnerState env =
+  initialRunnerState
+    (PromptArgs {history = [], prompt = ""})
+    (Stack emptyUsage (RunFinish (Right ())) KEmpty)
+    env
 
 mkBoard :: Map.Map Instance Cell -> Blackboard
 mkBoard cells =
@@ -394,4 +412,70 @@ labelEnvTests =
               Right e -> e
         labelEnvResolve env Root (Label "planner")
           @?= Child Root (Label "planner")
+    ]
+
+-- ---------------------------------------------------------------------------
+-- Path alignment (LabelEnv vs runtime resolution)
+-- ---------------------------------------------------------------------------
+
+pathAlignmentTests :: TestTree
+pathAlignmentTests =
+  testGroup
+    "path alignment"
+    [ testCase "WMap descends to child path before inner workflow" $ do
+        let wf :: Workflow () ()
+            wf =
+              WMap
+                (WLabel (Label "inner") (WLift (\_ -> pure ())))
+                (mapPolicy (TranscriptPolicyFunc id))
+            env = case buildLabelEnv wf of
+              Left err -> error $ show err
+              Right e -> e
+            rs = testRunnerState env
+            mapPath = enterChildPath rs (syntheticLabel 0)
+        mapPath @?= Child Root (Label "_0"),
+      testCase "WLabel + scope path matches buildLabelEnv" $ do
+        let wf :: Workflow () ()
+            wf =
+              WSeq
+                (WLabel (Label "planner") (WLift (\_ -> pure ())))
+                (WLift (\_ -> pure ()))
+                (seqPolicy (TranscriptPolicyFunc id))
+            env = case buildLabelEnv wf of
+              Left err -> error $ show err
+              Right e -> e
+            rs0 = testRunnerState env
+            rs1 = pushComposite CompSeq (syntheticLabel 0) (topPath rs0.rsPathStack) rs0
+            w1Path = resolveChildPath rs1 (syntheticLabel 0)
+            rs2 = pushScope (syntheticLabel 0) w1Path rs1
+            plannerPath = labelEnvResolve env w1Path (Label "planner")
+        plannerPath @?= Child (Child Root (Label "_0")) (Label "planner")
+        parentPath rs2.rsPathStack @?= w1Path,
+      testCase "Wf1 buildLabelEnv succeeds with distinct refiner labels" $ do
+        let wf :: Workflow PromptArgs Final
+            wf =
+              WMap
+                ( WSeq
+                    (WLabel (Label "planner") (WLift (\_ -> pure (emptyFinal ""))))
+                    ( WLabel (Label "refinement-loop") $
+                        WLoopWhile
+                          2
+                          (WLift (\_ -> pure ()))
+                          (loopDecPolicy (TranscriptPolicyFunc (const True)))
+                          []
+                          (loopFeedPolicy (TranscriptPolicyFunc (\_ -> PromptArgs {history = [], prompt = ""})))
+                          (WLabel (Label "loop-refiner") (WLift (\_ -> pure (emptyFinal ""))))
+                    )
+                    (seqPolicy TranscriptFinalToPromptArgs)
+                )
+                (mapPolicy (TranscriptPolicyFunc id))
+            expectedLoopRefiner =
+              let refinementLoopPath =
+                    Child (Child (Child Root (Label "_0")) (Label "_1")) (Label "refinement-loop")
+                  refinementBodyPath = Child refinementLoopPath (Label "body")
+               in Child refinementBodyPath (Label "loop-refiner")
+        case buildLabelEnv wf of
+          Left err -> assertFailure $ show err
+          Right env ->
+            Map.lookup (Label "loop-refiner") env.leNodePath @?= Just expectedLoopRefiner
     ]

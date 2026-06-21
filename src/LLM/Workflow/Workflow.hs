@@ -28,26 +28,40 @@ import LLM.Agent.ToolUtils (createToolContext, getResolvedTools)
 import LLM.Agent.Types (Agent (..), RuntimeArgs (..), ToolMap)
 import LLM.Workflow.BBEngine
   ( appendBodyOutput,
+    appendLoopDecision,
+    bumpLoopIteration,
     catchLeafCell,
     completeLeafCell,
     dualWriteSlot,
+    enterChildPath,
+    exitLoopScope,
     failLeafCell,
     initLoopSliceAt,
     mkPolicyView,
     nodeOutputFromFinal,
+    parentPath,
+    pushScope,
+    popPathFrame,
     pushComposite,
     pushLeaf,
+    pushParSide,
     resolveChildPath,
     resolveSidePath,
+    setLoopNextInput,
     startLeafCell,
     topPath,
     updateRunningHistory,
+    writeMapCell,
+    writeNestCell,
   )
 import LLM.Workflow.Blackboard
-    ( buildLabelEnv,
-      innermostLoopPathFromStack,
-      syntheticLabel,
-      initialRunnerState )
+  ( buildLabelEnv,
+    extendLabelEnv,
+    innermostLoopPathFromStack,
+    labelEnvResolve,
+    lookupSlot,
+    syntheticLabel,
+    initialRunnerState )
 import LLM.Workflow.ToolUtils (executeTool, mkSomeSubmit)
 import LLM.Workflow.Types
   ( AgentWithModels (agent, models),
@@ -63,6 +77,7 @@ import LLM.Workflow.Types
     Pending (..),
     PolicySite (..),
     Prompt (..),
+    Final (..),
     Blackboard (..),
     LoopSlice (..),
     PromptArgs (..),
@@ -152,10 +167,32 @@ cidToSlot = SlotByCid
 lookupLoopSlice :: Path -> Blackboard -> Maybe LoopSlice
 lookupLoopSlice path (Blackboard _ slices _ _ _) = Map.lookup path slices
 
+lookupAgentHistory :: Kont o r -> Maybe CID -> PromptArgs -> RunnerState s -> [Turn]
+lookupAgentHistory konts mcid i' rs =
+  case mcid of
+    Nothing -> i'.history
+    Just cid ->
+      let slotTurns = lookupSlot rs.rsBlackboard rs.rsPathStack (cidToSlot cid)
+       in if null slotTurns
+            then lookupHistory konts cid
+            else slotTurns
+
 leafSite :: RunnerState a -> (Path, Label)
 leafSite rs = case rs.rsPathStack of
   FrameLeaf lbl path : _ -> (path, lbl)
   _ -> (resolveChildPath rs (syntheticLabel 0), syntheticLabel 0)
+
+agentLeafSite :: RunnerState a -> (Path, Label)
+agentLeafSite rs = case rs.rsPathStack of
+  FrameScope lbl path : _ -> (path, lbl)
+  FrameLeaf lbl path : _ -> (path, lbl)
+  _ -> (resolveChildPath rs (syntheticLabel 0), syntheticLabel 0)
+
+ensureLeafFrame :: Label -> Path -> RunnerState a -> RunnerState a
+ensureLeafFrame lbl path rs =
+  case rs.rsPathStack of
+    FrameLeaf existingLbl existingPath : _ | existingLbl == lbl && existingPath == path -> rs
+    _ -> pushLeaf lbl path rs
 
 runWorkflow :: ToolMap ToolOutcome -> RuntimeArgs -> Workflow i o -> i -> IO (Either GenerateError o, Usage)
 runWorkflow toolMap rt workflow i = do
@@ -199,8 +236,29 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
     RunObject pending -> do
       result <- callLLMO toolMap rt pending
       case result of
-        Left err -> pure $ withStack (\_ -> Stack uAcc (RunThrow err) konts) rs
-        Right (value, usage) -> pure $ withStack (\_ -> Stack (uAcc <> usage) (RunReturn value) konts) rs
+        Left err ->
+          let rs' = case rs.rsCurrentLeaf of
+                Nothing -> rs
+                Just (path, iters) -> failLeafCell path iters err rs
+           in pure $ withStack (\_ -> Stack uAcc (RunThrow err) konts) rs'
+        Right (value, usage) ->
+          let rs' = case rs.rsCurrentLeaf of
+                Nothing -> rs
+                Just (path, iters) ->
+                  completeLeafCell
+                    path
+                    iters
+                    ( Final
+                        { prompt = Just pending.prompt,
+                          history = pending.prompt.history,
+                          newMessages = [],
+                          text = pending.prompt.prompt
+                        }
+                    )
+                    usage
+                    []
+                    rs
+           in pure $ withStack (\_ -> Stack (uAcc <> usage) (RunReturn value) konts) rs'
     RunPrompt pending mcid -> do
       let agentName = pending.prompt.agent.agent.agName
       _ <- TIO.putStr $ space <> agentName <> ": "
@@ -262,32 +320,31 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
             _ ->
               pure $ withStack (\_ -> Stack uAcc (RunReturn "Unexpected ToolYield") konts) rs
     RunWorkflow workflow i -> case workflow of
-      WLabel _ wf ->
-        pure $ withStack (\_ -> Stack uAcc (RunWorkflow wf i) konts) rs
+      WLabel lbl wf -> do
+        let lblPath = labelEnvResolve rs.rsLabelEnv (parentPath rs.rsPathStack) lbl
+            rs' = pushScope lbl lblPath rs
+         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow wf i) (KPopFrame konts)) rs'
       WPrompt a mbcid -> do
-        let (leafPath, leafLbl) = leafSite rs
+        let (leafPath, leafLbl) = agentLeafSite rs
             i' = unsafeCoerce i :: PromptArgs
-            h = maybe i'.history (lookupHistory konts) mbcid
+            h = lookupAgentHistory konts mbcid i' rs
             pending = Pending {prompt = Prompt {agent = a, prompt = i'.prompt, history = h}, toolRounds = [], submitTool = Nothing}
             rs' =
               startLeafCell leafPath rs.rsInstIters (Just a.agent.agName) $
-                if case rs.rsPathStack of FrameLeaf {} : _ -> True; _ -> False
-                  then rs
-                  else pushLeaf leafLbl leafPath rs
+                ensureLeafFrame leafLbl leafPath rs
          in pure $ withStack (\_ -> Stack uAcc (RunPrompt pending mbcid) konts) rs'
       WObject a -> do
-        let (leafPath, leafLbl) = leafSite rs
+        let (leafPath, leafLbl) = agentLeafSite rs
             i' = unsafeCoerce i :: PromptArgs
             pending = Pending {prompt = Prompt {agent = a, prompt = i'.prompt, history = i'.history}, toolRounds = [], submitTool = Nothing}
             rs' =
-              if case rs.rsPathStack of FrameLeaf {} : _ -> True; _ -> False
-                then rs
-                else pushLeaf leafLbl leafPath rs
+              startLeafCell leafPath rs.rsInstIters (Just a.agent.agName) $
+                ensureLeafFrame leafLbl leafPath rs
          in pure $ withStack (\_ -> Stack uAcc (RunObject pending) konts) rs'
       WAgentSubmit @o name agentWithModels mbcid -> do
-        let (leafPath, leafLbl) = leafSite rs
+        let (leafPath, leafLbl) = agentLeafSite rs
             i' = unsafeCoerce i :: PromptArgs
-            h = maybe i'.history (lookupHistory konts) mbcid
+            h = lookupAgentHistory konts mbcid i' rs
             agent' = ensureAgentTool name agentWithModels
             submit = mkSomeSubmit (Proxy @o) name "Submit the final structured result."
             pending =
@@ -298,12 +355,10 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
                 }
             rs' =
               startLeafCell leafPath rs.rsInstIters (Just agent'.agent.agName) $
-                if case rs.rsPathStack of FrameLeaf {} : _ -> True; _ -> False
-                  then rs
-                  else pushLeaf leafLbl leafPath rs
+                ensureLeafFrame leafLbl leafPath rs
          in pure $ withStack (\_ -> Stack uAcc (unsafeCoerce (RunPrompt pending mbcid)) konts) rs'
       WBlackboardPrompt assembler agent -> do
-        let (leafPath, leafLbl) = leafSite rs
+        let (leafPath, leafLbl) = agentLeafSite rs
             loopPath = fromMaybe (topPath rs.rsPathStack) (innermostLoopPathFromStack rs.rsPathStack)
             bv = mkPolicyView rs (PolicySite loopPath TriggerLoopDecider Nothing Nothing)
             args = assembler bv
@@ -315,26 +370,26 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
                 }
             rs' =
               startLeafCell leafPath rs.rsInstIters (Just agent.agent.agName) $
-                if case rs.rsPathStack of FrameLeaf {} : _ -> True; _ -> False
-                  then rs
-                  else pushLeaf leafLbl leafPath rs
+                ensureLeafFrame leafLbl leafPath rs
          in pure $ withStack (\_ -> Stack uAcc (RunPrompt pending Nothing) konts) rs'
       WSeq workflow1 workflow2 pol -> do
         let seqPath = topPath rs.rsPathStack
             site = PolicySite seqPath TriggerSeq Nothing Nothing
             rs' = pushComposite CompSeq (syntheticLabel 0) seqPath rs
-         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow1 i) (KSeq1 workflow2 pol site konts)) rs'
+            w1Path = resolveChildPath rs' (syntheticLabel 0)
+            rs'' = pushScope (syntheticLabel 0) w1Path rs'
+         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow1 i) (KSeq1 workflow2 pol site konts)) rs''
       WPar workflow1 workflow2 pol -> do
         let parPath = topPath rs.rsPathStack
             rs' = pushComposite CompPar (syntheticLabel 0) parPath rs
             leftPath = resolveChildPath rs' (syntheticLabel 0)
-            rs'' = pushLeaf (syntheticLabel 0) leftPath rs'
+            rs'' = pushParSide (syntheticLabel 0) SideLeft leftPath rs'
          in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow1 i) (KPar1 i workflow2 pol konts)) rs''
       WLift f -> do
         o <- f i
         pure $ withStack (\_ -> Stack uAcc (RunReturn o) konts) rs
       WMap workflow1 f -> do
-        let mapPath = topPath rs.rsPathStack
+        let mapPath = enterChildPath rs (syntheticLabel 0)
             site = PolicySite mapPath TriggerMap Nothing Nothing
             rs' = pushComposite CompMap (syntheticLabel 0) mapPath rs
          in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow1 i) (KMap f site konts)) rs'
@@ -345,7 +400,9 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
             rs' =
               initLoopSliceAt loopPath FixedCount n (unsafeCoerce i) scope $
                 pushComposite CompLoop (Label "loop") loopPath rs
-         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow wf i) (KLoop (n - 1) wf policy (Map.fromList [(cid, []) | cid <- cids]) site konts)) rs'
+            bodyPath = resolveChildPath rs' (Label "body")
+            rs'' = pushScope (Label "body") bodyPath rs' {rsInstIters = 1 : rs'.rsInstIters}
+         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow wf i) (KLoop (n - 1) wf policy (Map.fromList [(cid, []) | cid <- cids]) site konts)) rs''
       WLoopWhile maxIterations decider decisionPolicy cids policy wf -> do
         let loopPath = topPath rs.rsPathStack
             scope = map cidToSlot cids
@@ -353,6 +410,8 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
             rs' =
               initLoopSliceAt loopPath While maxIterations (unsafeCoerce i) scope $
                 pushComposite CompLoop (Label "refinement-loop") loopPath rs
+            bodyPath = resolveChildPath rs' (Label "body")
+            rs'' = pushScope (Label "body") bodyPath rs' {rsInstIters = 1 : rs'.rsInstIters}
          in pure $
               withStack
                 ( \_ ->
@@ -361,12 +420,19 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
                       (RunWorkflow wf i)
                       (KLoopWhile maxIterations 1 wf policy decider decisionPolicy (Map.fromList [(cid, []) | cid <- cids]) i [] site konts)
                 )
-                rs'
+                rs''
       WLiftW f -> do
-        wf <- f (fst i)
-        let nestPath = topPath rs.rsPathStack
-            rs' = pushComposite CompNest (syntheticLabel 0) nestPath rs
-         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow wf (snd i)) konts) rs'
+        wfNested <- f (fst i)
+        let nestPath = enterChildPath rs (syntheticLabel 0)
+            labelEnv' = case extendLabelEnv nestPath wfNested rs.rsLabelEnv of
+              Right e -> e
+              Left err -> error ("extendLabelEnv: " <> show err)
+            site = PolicySite nestPath TriggerMap Nothing Nothing
+            rs' =
+              pushComposite CompNest (syntheticLabel 0) nestPath rs
+                { rsLabelEnv = labelEnv'
+                }
+         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow wfNested (snd i)) (KNest site konts)) rs'
       WCatch o wf -> do
         let catchPath = topPath rs.rsPathStack
             rs' = pushComposite CompCatch (syntheticLabel 0) catchPath rs
@@ -377,10 +443,10 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
       case unwindToCatch konts of
         Just (CatchFrame caughtValue k) ->
           let rs' = case rs.rsCurrentLeaf of
-                Nothing -> rs
+                Nothing -> popPathFrame rs
                 Just (path, iters) ->
                   catchLeafCell path iters (unsafeCoerce caughtValue) err rs
-           in pure $ withStack (\_ -> Stack uAcc (RunReturn caughtValue) k) rs'
+           in pure $ withStack (\_ -> Stack uAcc (RunReturn caughtValue) k) (popPathFrame rs')
         Nothing -> do
           let rs' = case rs.rsCurrentLeaf of
                 Nothing -> rs
@@ -388,6 +454,9 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
            in pure $ withStack (\_ -> Stack uAcc (RunFinish (Left err)) KEmpty) rs'
     RunReturn o -> case konts of
       KEmpty -> pure $ withStack (\_ -> Stack uAcc (RunFinish (Right (unsafeCoerce o))) KEmpty) rs
+      KPopFrame k -> do
+        let rs' = popPathFrame rs
+         in pure $ withStack (\_ -> Stack uAcc (RunReturn o) k) rs'
       KTool pending mcid assistantTurn toolCalls toolResults toolCall k ->
         let tr = ToolResult toolCall.tcId toolCall.tcName o
             toolResults' = tr : toolResults
@@ -408,37 +477,55 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
                                 updateRunningHistory path iters (pendingToTurns pending') rs
                          in pure $ withStack (\_ -> Stack uAcc (RunPrompt pending' mcid) k) rs'
       KSeq1 workflow2 pol site k -> do
-        let predInst = Instance (resolveChildPath rs (syntheticLabel 0)) rs.rsInstIters
-            bv = mkPolicyView rs site {psPredecessor = Just predInst, psSelf = Just predInst, psTrigger = TriggerSeq}
+        let rsAfterW1 = popPathFrame rs
+            predInst = Instance (resolveChildPath rsAfterW1 (syntheticLabel 0)) rsAfterW1.rsInstIters
+            selfInst = Instance (resolveChildPath rsAfterW1 (syntheticLabel 1)) rsAfterW1.rsInstIters
+            bv = mkPolicyView rsAfterW1 site {psPredecessor = Just predInst, psSelf = Just selfInst, psTrigger = TriggerSeq}
             o' = runSeqPolicy pol bv o
-            w2Path = resolveChildPath rs (syntheticLabel 1)
-            rs' = pushLeaf (syntheticLabel 1) w2Path rs
-         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow2 o') k) rs'
+            w2Path = resolveChildPath rsAfterW1 (syntheticLabel 1)
+            rs' = pushScope (syntheticLabel 1) w2Path rsAfterW1
+         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow2 o') (KPopFrame k)) rs'
       KPar1 i' workflow2 pol k ->
         let rightPath = resolveSidePath rs SideRight
-            rs' = pushLeaf (syntheticLabel 1) rightPath rs
+            rs' = pushParSide (syntheticLabel 1) SideRight rightPath rs
          in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow2 i') (KPar2 o pol (PolicySite (topPath rs.rsPathStack) TriggerParMerge Nothing Nothing) k)) rs'
       KPar2 x pol site k -> do
         let bv = mkPolicyView rs site {psTrigger = TriggerParMerge}
             merged = runMergePolicy pol bv x o
-         in pure $ withStack (\_ -> Stack uAcc (RunReturn merged) k) rs
+            rs' = popPathFrame rs
+         in pure $ withStack (\_ -> Stack uAcc (RunReturn merged) k) rs'
       KMap pol site k -> do
         let bv = mkPolicyView rs site {psTrigger = TriggerMap}
+            rawOut = nodeOutputFromFinal (unsafeCoerce o)
             mapped = runMapPolicy pol bv o
-         in pure $ withStack (\_ -> Stack uAcc (RunReturn mapped) k) rs
+            mappedOut = nodeOutputFromFinal (unsafeCoerce mapped)
+            rs' =
+              writeMapCell site.psLocal rs.rsInstIters rawOut mappedOut rs
+                |> popPathFrame
+         in pure $ withStack (\_ -> Stack uAcc (RunReturn mapped) k) rs'
       KLoop n workflow policy cids site k -> do
         let loopPath = site.psLocal
             rs' = appendBodyOutput loopPath (nodeOutputFromFinal (unsafeCoerce o)) rs
             bv = mkPolicyView rs' site {psTrigger = TriggerLoopFeedback}
             slice = fromMaybe (error "KLoop: missing slice") (lookupLoopSlice loopPath rs'.rsBlackboard)
          in if n < 1
-              then pure $ withStack (\_ -> Stack uAcc (RunReturn o) k) rs'
+              then do
+                let rs'' = exitLoopScope rs'
+                 in pure $ withStack (\_ -> Stack uAcc (RunReturn o) k) rs''
               else do
                 let nextInput = runLoopFeedPolicy policy bv slice o
-                 in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow nextInput) (KLoop (n - 1) workflow policy cids site k)) rs'
+                    nextIter = slice.lsIteration + 1
+                    rsUpdated =
+                      setLoopNextInput loopPath (unsafeCoerce nextInput) $
+                        bumpLoopIteration loopPath nextIter rs'
+                    rsWithIters =
+                      rsUpdated {rsInstIters = case rsUpdated.rsInstIters of _ : rest -> nextIter : rest; _ -> [nextIter]}
+                 in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow nextInput) (KLoop (n - 1) workflow policy cids site k)) rsWithIters
       KLoopWhile maxIterations iteration workflow policy decider decisionPolicy cids _currentInput outputsRev site k -> do
         let loopPath = site.psLocal
-            rs' = appendBodyOutput loopPath (nodeOutputFromFinal (unsafeCoerce o)) rs
+            rs' =
+              bumpLoopIteration loopPath iteration $
+                appendBodyOutput loopPath (nodeOutputFromFinal (unsafeCoerce o)) rs
             bv = mkPolicyView rs' site {psTrigger = TriggerLoopFeedback}
             slice = fromMaybe (error "KLoopWhile: missing slice") (lookupLoopSlice loopPath rs'.rsBlackboard)
             nextInput = runLoopFeedPolicy policy bv slice o
@@ -446,10 +533,13 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
             deciderSite = PolicySite loopPath TriggerLoopDecider Nothing Nothing
             deciderInput = PromptArgs {history = [], prompt = ""}
          in if iteration >= maxIterations
-              then pure $ withStack (\_ -> Stack uAcc (RunReturn o) k) rs'
+              then do
+                let rs'' = exitLoopScope rs'
+                 in pure $ withStack (\_ -> Stack uAcc (RunReturn o) k) rs''
               else do
-                let deciderPath = resolveChildPath rs' (Label "decider")
-                    rs'' = pushLeaf (Label "decider") deciderPath rs'
+                let rsUpdated = setLoopNextInput loopPath (unsafeCoerce nextInput) rs'
+                    deciderPath = resolveChildPath rsUpdated (Label "decider")
+                    rs'' = pushLeaf (Label "decider") deciderPath rsUpdated
                  in pure $
                       withStack
                         ( \_ ->
@@ -476,10 +566,17 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
         let loopPath = site.psLocal
             bv = mkPolicyView rs site {psTrigger = TriggerLoopDecider}
             slice = fromMaybe (error "KLoopWhileDecision: missing slice") (lookupLoopSlice loopPath rs.rsBlackboard)
-         in if runLoopDecPolicy decisionPolicy bv slice o
+            continue = runLoopDecPolicy decisionPolicy bv slice o
+            rs' = appendLoopDecision loopPath continue rs
+         in if continue
               then do
-                let bodyPath = resolveChildPath rs (Label "body")
-                    rs' = pushLeaf (Label "body") bodyPath rs {rsInstIters = (iteration + 1) : rs.rsInstIters}
+                let nextIteration = iteration + 1
+                    bodyPath = resolveChildPath rs (Label "body")
+                    rs'' =
+                      pushScope (Label "body") bodyPath $
+                        bumpLoopIteration loopPath nextIteration rs'
+                          { rsInstIters = case rs.rsInstIters of _ : rest -> nextIteration : rest; _ -> [nextIteration]
+                          }
                  in pure $
                       withStack
                         ( \_ ->
@@ -488,7 +585,7 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
                               (RunWorkflow workflow nextInput)
                               ( KLoopWhile
                                   maxIterations
-                                  (iteration + 1)
+                                  nextIteration
                                   workflow
                                   policy
                                   decider
@@ -500,10 +597,21 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
                                   k
                               )
                         )
-                        rs'
-              else pure $ withStack (\_ -> Stack uAcc (RunReturn lastOutput) k) rs
+                        rs''
+              else do
+                let rs'' = exitLoopScope rs'
+                 in pure $ withStack (\_ -> Stack uAcc (RunReturn lastOutput) k) rs''
       KUpdateHistory cid history k -> do
         let rs' = dualWriteSlot (cidToSlot cid) history rs
          in pure $ withStack (\_ -> Stack uAcc step $ updateHistory cid history k) rs'
-      KCatch _r k ->
-        pure $ withStack (\_ -> Stack uAcc step k) rs
+      KCatch caught k -> do
+        let rs' = popPathFrame rs
+         in pure $ withStack (\_ -> Stack uAcc (RunReturn caught) k) rs'
+      KNest site k -> do
+        let rs' =
+              writeNestCell site.psLocal rs.rsInstIters (nodeOutputFromFinal (unsafeCoerce o)) rs
+                |> popPathFrame
+         in pure $ withStack (\_ -> Stack uAcc (RunReturn o) k) rs'
+
+(|>) :: a -> (a -> b) -> b
+x |> f = f x
