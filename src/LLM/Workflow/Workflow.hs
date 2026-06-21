@@ -98,6 +98,7 @@ import LLM.Workflow.Types
     Workflow (..),
     historyPersistKey,
   )
+import System.IO.Unsafe (unsafePerformIO)
 import LLM.Workflow.Utils
   ( CatchFrame (CatchFrame),
     ensureAgentTool,
@@ -122,10 +123,8 @@ import LLM.Workflow.Utils
 import Unsafe.Coerce (unsafeCoerce)
 
 wfDebugEnabled :: Bool
-wfDebugEnabled = True
-
--- wfDebugEnabled = unsafePerformIO $ (== Just "1") <$> lookupEnv "WF_DEBUG"
--- {-# NOINLINE wfDebugEnabled #-}
+wfDebugEnabled = unsafePerformIO $ (== Just "1") <$> lookupEnv "WF_DEBUG"
+{-# NOINLINE wfDebugEnabled #-}
 
 debugEvalLine :: Text -> IO ()
 debugEvalLine line =
