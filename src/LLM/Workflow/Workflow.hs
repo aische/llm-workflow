@@ -7,6 +7,7 @@ import Data.Proxy (Proxy (..))
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
+import System.Environment (lookupEnv)
 import LLM
   ( ChatResponse (..),
     GeneratableObject,
@@ -155,6 +156,9 @@ showStreamChunk = \case
 submitRequiredError :: GenerateError
 submitRequiredError = unsafeCoerce ("Agent must call the submit tool to finish" :: Text)
 
+submitDecodeError :: Text -> GenerateError
+submitDecodeError = unsafeCoerce
+
 startToolRound ::
   Pending ->
   HistoryMode ->
@@ -211,9 +215,16 @@ persistKont mode turns kont =
 
 policyTriggerForPrompt :: RunnerState a -> Trigger
 policyTriggerForPrompt rs =
-  case innermostLoopPathFromStack rs.rsPathStack of
-    Just _ -> TriggerLoopDecider
-    Nothing -> TriggerSeq
+  case rs.rsPathStack of
+    FrameScope (Label "body") _ : _ -> TriggerLoopBody
+    FrameComposite CompCatch _ _ : _ -> TriggerCatch
+    FrameLeaf (Label "decider") _ : _ -> TriggerLoopDecider
+    FrameParSide _ SideLeft _ : _ -> TriggerParLeft
+    FrameParSide _ SideRight _ : _ -> TriggerParRight
+    _ ->
+      case innermostLoopPathFromStack rs.rsPathStack of
+        Just _ -> TriggerLoopDecider
+        Nothing -> TriggerSeq
 
 leafSite :: RunnerState a -> (Path, Label)
 leafSite rs = case rs.rsPathStack of
@@ -344,9 +355,11 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
                 Right decoded ->
                   pure $ withStack (\_ -> Stack uAcc (RunReturn (unsafeCoerce decoded)) (unwindPastTools konts)) rs
                 Left err ->
-                  pure $ withStack (\_ -> Stack uAcc (RunReturn ("Submit decode error: " <> err)) konts) rs
+                  let rs' = failCurrentLeaf (submitDecodeError err) rs
+                   in pure $ withStack (\_ -> Stack uAcc (RunReturn ("Submit decode error: " <> err)) (unwindPastTools konts)) rs'
             _ ->
-              pure $ withStack (\_ -> Stack uAcc (RunReturn "Unexpected ToolYield") konts) rs
+              let rs' = failCurrentLeaf submitRequiredError rs
+               in pure $ withStack (\_ -> Stack uAcc (RunReturn "Unexpected ToolYield") konts) rs'
     RunWorkflow workflow i -> case workflow of
       WLabel lbl wf -> do
         let lblPath = labelEnvResolve rs.rsLabelEnv (parentPath rs.rsPathStack) lbl
@@ -513,14 +526,14 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
                                 updateRunningHistory path iters (pendingToTurns pending') rs
                          in pure $ withStack (\_ -> Stack uAcc (RunPrompt pending' mode) k) rs'
       KSeq1 workflow2 pol site k -> do
-        let rsAfterW1 = popPathFrame rs
-            predInst = Instance (resolveChildPath rsAfterW1 (syntheticLabel 0)) rsAfterW1.rsInstIters
-            selfInst = Instance (resolveChildPath rsAfterW1 (syntheticLabel 1)) rsAfterW1.rsInstIters
+        let predInst = Instance (resolveChildPath rs (syntheticLabel 0)) rs.rsInstIters
+            selfInst = Instance (resolveChildPath rs (syntheticLabel 1)) rs.rsInstIters
+            rsAfterW1 = popCompositeFrame CompSeq $ popPathFrame rs
             bv = mkPolicyView rsAfterW1 site {psPredecessor = Just predInst, psSelf = Just selfInst, psTrigger = TriggerSeq}
             o' = runSeqPolicy pol bv o
             w2Path = resolveChildPath rsAfterW1 (syntheticLabel 1)
             rs' = pushScope (syntheticLabel 1) w2Path rsAfterW1
-         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow2 o') (KPopFrame (KPopComposite CompSeq k))) rs'
+         in pure $ withStack (\_ -> Stack uAcc (RunWorkflow workflow2 o') (KPopFrame k)) rs'
       KPar1 i' workflow2 pol site k ->
         let rightPath = resolveSidePath rs SideRight
             rs' = pushParSide (syntheticLabel 1) SideRight rightPath rs
@@ -541,6 +554,7 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
          in pure $ withStack (\_ -> Stack uAcc (RunReturn mapped) k) rs'
       KLoop n workflow policy slots site k -> do
         let loopPath = site.psLocal
+            currentIter = case rs.rsInstIters of i : _ -> i; _ -> 1
             rs' = appendBodyOutput loopPath (nodeOutputFromFinal (unsafeCoerce o)) rs
             bv = mkPolicyView rs' site {psTrigger = TriggerLoopFeedback}
             slice = fromMaybe (error "KLoop: missing slice") (lookupLoopSlice loopPath rs'.rsBlackboard)
@@ -550,7 +564,7 @@ eval toolMap rt rs@RunnerState {rsStack = Stack uAcc step konts} = do
                  in pure $ withStack (\_ -> Stack uAcc (RunReturn o) k) rs''
               else do
                 let nextInput = runLoopFeedPolicy policy bv slice o
-                    nextIter = slice.lsIteration + 1
+                    nextIter = currentIter + 1
                     rsUpdated =
                       setLoopNextInput loopPath (unsafeCoerce nextInput) $
                         bumpLoopIteration loopPath nextIter rs'

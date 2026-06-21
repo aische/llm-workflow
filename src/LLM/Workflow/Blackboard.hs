@@ -22,14 +22,21 @@ module LLM.Workflow.Blackboard
     globalPath,
     globalLabel,
     atBodyLabel,
-    requireAt,
     cellFinal,
     cellHistory,
     cellText,
+    cellOutputJson,
+    nodeOutputText,
+    loopOutputTexts,
+    labelPath,
+    loopPathFromBodyAgent,
     localCompleted,
     predecessor,
     parBranch,
     loopSlice,
+    loopSliceAt,
+    completedIterationsAt,
+    latestCompletedIterationAt,
     priorIterations,
     showBlackboard,
     showPathStack,
@@ -46,12 +53,15 @@ module LLM.Workflow.Blackboard
 where
 
 import Control.Monad (foldM)
+import Data.Aeson (Value, encode)
+import Data.ByteString.Lazy qualified as BL
 import Data.List (find, sortOn)
 import Data.Map qualified as Map
 import Data.Maybe (listToMaybe)
 import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding (decodeUtf8)
 import LLM.Core.Usage (emptyUsage)
 import LLM.Core.Types (Turn)
 import LLM.Workflow.Types
@@ -209,9 +219,28 @@ innermostLoopPathFromStack =
 innermostLoopPath :: BlackboardView -> Maybe Path
 innermostLoopPath bv = innermostLoopPathFromStack bv.bvPathStack
 
+isDescendantOf :: Path -> Path -> Bool
+isDescendantOf child parent =
+  child == parent || case child of
+    Child p _ -> isDescendantOf p parent
+    Root -> False
+
+isAncestorOf :: Path -> Path -> Bool
+isAncestorOf ancestor path = isDescendantOf path ancestor
+
 -- ---------------------------------------------------------------------------
 -- Query API
 -- ---------------------------------------------------------------------------
+
+labelPath :: BlackboardView -> Label -> Maybe Path
+labelPath bv lbl = Map.lookup lbl bv.bvLabelEnv.leNodePath
+
+loopPathFromBodyAgent :: LabelEnv -> Label -> Maybe Path
+loopPathFromBodyAgent env lbl =
+  Map.lookup lbl env.leNodePath >>= \agentPath ->
+    case agentPath of
+      Child (Child loopP (Label "body")) _ -> Just loopP
+      _ -> Nothing
 
 scopeRoot :: BlackboardView -> Path
 scopeRoot bv = bv.bvLocal
@@ -236,8 +265,14 @@ atLabel bv lbl = atPath bv (Child (scopeRoot bv) lbl)
 atBodyLabel :: BlackboardView -> Label -> Maybe Cell
 atBodyLabel bv lbl =
   case innermostLoopPath bv of
-    Nothing -> Nothing
     Just loopP -> atPath bv (Child (loopBodyPath loopP) lbl)
+    Nothing ->
+      case labelPath bv lbl of
+        Nothing -> Nothing
+        Just path ->
+          case atPath bv path of
+            Just cell -> Just cell
+            Nothing -> latestCompletedIterationAt bv path
 
 globalPath :: BlackboardView -> Path -> Maybe Cell
 globalPath bv path =
@@ -248,9 +283,6 @@ globalLabel bv lbl =
   case Map.lookup lbl bv.bvLabelEnv.leNodePath of
     Just path -> globalPath bv path
     Nothing -> Nothing
-
-requireAt :: BlackboardView -> Path -> Maybe Cell
-requireAt = atPath
 
 cellFinal :: Cell -> Final
 cellFinal cell =
@@ -265,6 +297,21 @@ cellHistory = (.cellHistory)
 cellText :: Cell -> Text
 cellText cell = (cellFinal cell).text
 
+cellOutputJson :: Cell -> Maybe Value
+cellOutputJson cell =
+  case cell.cellOutput of
+    Just (OutValue v) -> Just v
+    _ -> Nothing
+
+nodeOutputText :: NodeOutput -> Text
+nodeOutputText = \case
+  OutFinal f -> f.text
+  OutText t -> t
+  OutValue v -> decodeUtf8 (BL.toStrict (encode v))
+
+loopOutputTexts :: LoopSlice -> [Text]
+loopOutputTexts = map nodeOutputText . (.lsOutputs)
+
 localCompleted :: BlackboardView -> [Cell]
 localCompleted bv =
   Map.elems $
@@ -275,12 +322,6 @@ localCompleted bv =
             && isCompleted cell
       )
       bv.bvBoard.bbCells
-  where
-    isDescendantOf :: Path -> Path -> Bool
-    isDescendantOf child parent =
-      child == parent || case child of
-        Child p _ -> isDescendantOf p parent
-        Root -> False
 
 predecessor :: BlackboardView -> Maybe Cell
 predecessor bv =
@@ -314,31 +355,42 @@ deepestCompletedUnder bv path =
           Child parent _ -> 1 + pathDepth ancestor parent
           Root -> 0
 
-isAncestorOf :: Path -> Path -> Bool
-isAncestorOf ancestor path = isDescendantOf path ancestor
-  where
-    isDescendantOf :: Path -> Path -> Bool
-    isDescendantOf child parent =
-      child == parent || case child of
-        Child p _ -> isDescendantOf p parent
-        Root -> False
-
 loopSlice :: BlackboardView -> Maybe LoopSlice
 loopSlice bv =
   case innermostLoopPath bv of
+    Just path -> loopSliceAt bv path
     Nothing -> Nothing
-    Just path -> Map.lookup path bv.bvBoard.bbSlices
+
+loopSliceAt :: BlackboardView -> Path -> Maybe LoopSlice
+loopSliceAt bv path = Map.lookup path bv.bvBoard.bbSlices
+
+completedIterationsAt :: BlackboardView -> Path -> [Cell]
+completedIterationsAt bv path =
+  map snd $
+    sortOn fst
+      [ (inst.instIters, cell)
+        | (inst, cell) <- Map.toList bv.bvBoard.bbCells,
+          inst.instPath == path,
+          not (null inst.instIters),
+          isCompleted cell
+      ]
+
+latestCompletedIterationAt :: BlackboardView -> Path -> Maybe Cell
+latestCompletedIterationAt bv path = listToMaybe (reverse (completedIterationsAt bv path))
 
 priorIterations :: BlackboardView -> Path -> [Cell]
 priorIterations bv path =
   case bv.bvInstIters of
-    [] -> []
-    current : rest ->
+    current : rest | current > 1 ->
       [ cell
         | n <- [1 .. current - 1],
           let inst = Instance path (n : rest),
           Just cell <- [lookupCompletedCell bv.bvBoard inst]
       ]
+    _ ->
+      case completedIterationsAt bv path of
+        [] -> []
+        cells -> init cells
 
 -- ---------------------------------------------------------------------------
 -- Show / debug

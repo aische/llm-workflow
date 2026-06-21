@@ -27,11 +27,13 @@ import LLM.Workflow
     blackboardLoopDec,
     blackboardLoopFeed,
     cellText,
+    completedIterationsAt,
     emptyFinal,
     globalLabel,
-    innermostLoopPath,
-    loopBodyPath,
-    loopSlice,
+    labelPath,
+    loopOutputTexts,
+    loopPathFromBodyAgent,
+    loopSliceAt,
     mapPolicy,
     parBranch,
     priorIterations,
@@ -134,16 +136,31 @@ buildWf1Workflow (models, models2) =
 
 refinerBodyPath :: BlackboardView -> Path
 refinerBodyPath bv =
-  case innermostLoopPath bv of
-    Nothing -> Child Root (Label "loop-refiner")
-    Just loopP -> Child (loopBodyPath loopP) (Label "loop-refiner")
+  fromMaybe Root $
+    labelPath bv (Label "loop-refiner")
 
 maybeCellText :: Maybe Cell -> Text
 maybeCellText = maybe "" cellText
 
+refinerIterationTexts :: BlackboardView -> [Text]
+refinerIterationTexts bv =
+  let refinerPath = refinerBodyPath bv
+      cellRefs = map cellText (completedIterationsAt bv refinerPath)
+   in if null cellRefs
+        then
+          maybe
+            []
+            loopOutputTexts
+            (loopPathFromBodyAgent bv.bvLabelEnv (Label "loop-refiner") >>= loopSliceAt bv)
+        else cellRefs
+
+loopSliceForRefiner :: BlackboardView -> Maybe LoopSlice
+loopSliceForRefiner bv =
+  loopPathFromBodyAgent bv.bvLabelEnv (Label "loop-refiner") >>= loopSliceAt bv
+
 wf1DeciderPrompt :: BlackboardView -> PromptArgs
 wf1DeciderPrompt bv =
-  let slice = loopSlice bv
+  let slice = loopSliceForRefiner bv
       iter = maybe 1 (.lsIteration) slice
       maxIter = maybe 1 (.lsMax) slice
       planner = maybeCellText (globalLabel bv (Label "planner"))
@@ -185,7 +202,7 @@ wf1DeciderPrompt bv =
 
 wf1RefinerLoopFeed :: BlackboardView -> LoopSlice -> Final -> PromptArgs
 wf1RefinerLoopFeed bv slice _ =
-  let iter = slice.lsIteration
+  let nextIter = min (slice.lsIteration + 1) slice.lsMax
       maxIter = slice.lsMax
       planner = maybeCellText (globalLabel bv (Label "planner"))
       reviewA = maybeCellText (globalLabel bv (Label "reviewer-a"))
@@ -199,7 +216,7 @@ wf1RefinerLoopFeed bv slice _ =
         { history = [],
           prompt =
             T.unlines $
-              [ "Refinement iteration " <> T.pack (show iter) <> "/" <> T.pack (show maxIter),
+              [ "Refinement iteration " <> T.pack (show nextIter) <> "/" <> T.pack (show maxIter),
                 "",
                 "Re-read the full audit context from the blackboard and produce an improved consolidation.",
                 "",
@@ -242,18 +259,9 @@ wf1FinalizerInput bv =
   let planner = maybeCellText (globalLabel bv (Label "planner"))
       reviewA = maybeCellText (globalLabel bv (Label "reviewer-a"))
       reviewB = maybeCellText (globalLabel bv (Label "reviewer-b"))
-      refinerPath = refinerBodyPath bv
-      priorRefs = map cellText (priorIterations bv refinerPath)
-      latestRef = maybeCellText (atBodyLabel bv (Label "loop-refiner"))
-      allRefs =
-        case priorRefs of
-          [] -> [latestRef]
-          _
-            | latestRef == last priorRefs -> priorRefs
-            | T.null latestRef -> priorRefs
-            | otherwise -> priorRefs ++ [latestRef]
+      allRefs = refinerIterationTexts bv
       iterInfo =
-        maybe "unknown" (\s -> T.pack (show s.lsIteration) <> "/" <> T.pack (show s.lsMax)) (loopSlice bv)
+        maybe "unknown" (\s -> T.pack (show (length allRefs)) <> "/" <> T.pack (show s.lsMax)) (loopSliceForRefiner bv)
    in PromptArgs
         { history = [],
           prompt =

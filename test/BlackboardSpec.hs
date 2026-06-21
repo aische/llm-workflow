@@ -33,7 +33,8 @@ spec =
       wCatchParBranchTests,
       labelEnvTests,
       pathAlignmentTests,
-      queryRegressionTests
+      queryRegressionTests,
+      postLoopQueryTests
     ]
 
 -- ---------------------------------------------------------------------------
@@ -534,4 +535,105 @@ queryRegressionTests =
         topPath rs2.rsPathStack @?= leftPath
         let mergeSite = PolicySite parPath' TriggerParMerge Nothing Nothing
         mergeSite.psLocal @?= parPath'
+    ]
+
+-- ---------------------------------------------------------------------------
+-- Post-loop query API
+-- ---------------------------------------------------------------------------
+
+postLoopQueryTests :: TestTree
+postLoopQueryTests =
+  testGroup
+    "post-loop queries"
+    [ testCase "completedIterationsAt returns all iteration cells after loop exit" $ do
+        let board =
+              mkBoard $
+                Map.fromList
+                  [ (inst refinerPath [1], doneCell "ref-1"),
+                    (inst refinerPath [2], doneCell "ref-2"),
+                    (inst refinerPath [3], doneCell "ref-3")
+                  ]
+            bv =
+              BlackboardView
+                { bvBoard = board,
+                  bvLocal = Child Root (Label "refinement-loop"),
+                  bvSelf = Nothing,
+                  bvPredecessor = Nothing,
+                  bvTrigger = TriggerSeq,
+                  bvPathStack = [FrameRoot, FrameScope (Label "refinement-loop") (Child Root (Label "refinement-loop"))],
+                  bvInstIters = [],
+                  bvLabelEnv =
+                    emptyLabelEnv
+                      { leNodePath = Map.singleton (Label "loop-refiner") refinerPath
+                      }
+                }
+        map cellText (completedIterationsAt bv refinerPath) @?= ["ref-1", "ref-2", "ref-3"],
+      testCase "atBodyLabel falls back to latest iteration via label env" $ do
+        let board = mkBoard (Map.singleton (inst refinerPath [2]) (doneCell "latest-ref"))
+            bv =
+              BlackboardView
+                { bvBoard = board,
+                  bvLocal = Child Root (Label "refinement-loop"),
+                  bvSelf = Nothing,
+                  bvPredecessor = Nothing,
+                  bvTrigger = TriggerSeq,
+                  bvPathStack = [FrameRoot],
+                  bvInstIters = [],
+                  bvLabelEnv =
+                    emptyLabelEnv
+                      { leNodePath = Map.singleton (Label "loop-refiner") refinerPath
+                      }
+                }
+        cellText <$> atBodyLabel bv (Label "loop-refiner") @?= Just "latest-ref",
+      testCase "priorIterations after loop exit excludes latest iteration" $ do
+        let board =
+              mkBoard $
+                Map.fromList
+                  [ (inst refinerPath [1], doneCell "a"),
+                    (inst refinerPath [2], doneCell "b")
+                  ]
+            bv =
+              BlackboardView
+                { bvBoard = board,
+                  bvLocal = Root,
+                  bvSelf = Nothing,
+                  bvPredecessor = Nothing,
+                  bvTrigger = TriggerSeq,
+                  bvPathStack = [FrameRoot],
+                  bvInstIters = [],
+                  bvLabelEnv = emptyLabelEnv
+                }
+        map cellText (priorIterations bv refinerPath) @?= ["a"],
+      testCase "loopSliceAt reads slice without loop frame on stack" $ do
+        let slice = emptyLoopSlice While 4 (PromptArgs {history = [], prompt = "in"})
+            board =
+              (mkBoard Map.empty)
+                { bbSlices = Map.singleton loopPath slice
+                }
+            bv =
+              BlackboardView
+                { bvBoard = board,
+                  bvLocal = Root,
+                  bvSelf = Nothing,
+                  bvPredecessor = Nothing,
+                  bvTrigger = TriggerSeq,
+                  bvPathStack = [FrameRoot],
+                  bvInstIters = [],
+                  bvLabelEnv = emptyLabelEnv
+                }
+        maybe (assertFailure "no slice") (\s -> s.lsMax @?= 4) (loopSliceAt bv loopPath),
+      testCase "loopPathFromBodyAgent derives loop path from labeled body agent" $ do
+        loopPathFromBodyAgent
+          (emptyLabelEnv {leNodePath = Map.singleton (Label "loop-refiner") refinerPath})
+          (Label "loop-refiner")
+          @?= Just loopPath,
+      testCase "cellOutputJson only surfaces OutValue outputs" $ do
+        isNothing (cellOutputJson (doneCell "text")) @?= True
+        isNothing (cellOutputJson ((emptyCell {cellStatus = CellDone}) {cellOutput = Just (OutText "plain")})) @?= True,
+      testCase "loopOutputTexts reads accumulated body outputs" $ do
+        let slice =
+              appendLoopOutput (OutFinal (mkFinal "two")) $
+                appendLoopOutput (OutFinal (mkFinal "one")) $
+                  emptyLoopSlice While 3 (PromptArgs {history = [], prompt = "in"})
+        loopOutputTexts slice @?= ["one", "two"]
     ]
