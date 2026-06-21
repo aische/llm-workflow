@@ -49,6 +49,8 @@ library
     exposed-modules:
 
         LLM.Workflow
+        LLM.Workflow.BBEngine
+        LLM.Workflow.Blackboard
         LLM.Workflow.Types
         LLM.Workflow.Workflow
         LLM.Workflow.ToolUtils
@@ -105,3 +107,18 @@ executable llm-workflow
         llm-simple,
         llm-workflow,
 
+test-suite blackboard-spec
+    import: opts
+    type: exitcode-stdio-1.0
+    main-is: Main.hs
+    other-modules: BlackboardSpec
+    hs-source-dirs: test
+    build-depends:
+        base           ^>=4.18,
+        containers     ^>=0.6.7,
+        tasty          >=1.4   && <1.6,
+        tasty-hunit    >=0.10  && <0.11,
+        text           >=1.2   && <2.2,
+        uuid-types     >=1.0   && <1.1,
+        llm-simple,
+        llm-workflow,

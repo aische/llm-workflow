@@ -5,6 +5,7 @@ where
 
 import Autodocodec qualified as AC
 import Data.Aeson (FromJSON, ToJSON)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
@@ -12,14 +13,32 @@ import LLM (Agent (..))
 import LLM.Generate (ModelWithFallbacks)
 import LLM.Workflow
   ( AgentWithModels (..),
-    LoopContext (..),
+    AnyMergePolicy (..),
+    BlackboardView (..),
+    Cell (..),
+    Label (..),
+    LoopSlice (..),
+    Path (..),
     PromptArgs (..),
+    Side (..),
     Workflow (..),
+    atBodyLabel,
+    blackboardLoopDec,
+    blackboardLoopFeed,
+    cellText,
     emptyFinal,
+    globalLabel,
+    innermostLoopPath,
+    loopBodyPath,
+    loopSlice,
+    mapPolicy,
+    parBranch,
+    priorIterations,
+    seqPolicy,
+    seqPolicyBB,
   )
 import LLM.Workflow.Types
   ( Final (..),
-    MergePolicy (MergePolicyFunc),
     TranscriptPolicy (TranscriptFinalToPromptArgs, TranscriptPolicyFunc),
   )
 
@@ -41,84 +60,223 @@ instance AC.HasCodec LoopDecision where
 buildWf1Workflow :: (ModelWithFallbacks, ModelWithFallbacks) -> Workflow PromptArgs Final
 buildWf1Workflow (models, models2) =
   WMap
-    (WSeq initialDraft (mkConditionalLoop 4 refiner deciderWorkflow) TranscriptFinalToPromptArgs)
-    (TranscriptPolicyFunc (\result -> result {text = "WF1 Result\n\n" <> result.text}))
+    (WSeq initialDraft (mkConditionalLoop 4 refiner deciderWorkflow) (seqPolicy TranscriptFinalToPromptArgs))
+    (mapPolicy (TranscriptPolicyFunc (\result -> result {text = "WF1 Result\n\n" <> result.text})))
   where
-    planner = WPrompt (AgentWithModels plannerAgent models) Nothing
-    reviewerA = WPrompt (AgentWithModels reviewerAgentA models2) Nothing
-    reviewerB = WPrompt (AgentWithModels reviewerAgentB models) Nothing
-    refiner = WPrompt (AgentWithModels refinerAgent models) Nothing
-    finalizer = WPrompt (AgentWithModels finalizerAgent models) Nothing
-    deciderSubmit = WAgentSubmit "submit_decision" (AgentWithModels deciderAgent models) Nothing
+    planner = WLabel (Label "planner") $ WPrompt (AgentWithModels plannerAgent models) Nothing
+    reviewerA = WLabel (Label "reviewer-a") $ WPrompt (AgentWithModels reviewerAgentA models2) Nothing
+    reviewerB = WLabel (Label "reviewer-b") $ WPrompt (AgentWithModels reviewerAgentB models) Nothing
+    refiner = WLabel (Label "refiner") $ WPrompt (AgentWithModels refinerAgent models) Nothing
+    finalizer = WLabel (Label "finalizer") $ WPrompt (AgentWithModels finalizerAgent models) Nothing
+    deciderSubmit :: Workflow PromptArgs LoopDecision
+    deciderSubmit = WLabel (Label "decider") $ WAgentSubmit "submit_decision" (AgentWithModels deciderAgent models) Nothing
 
     initialDraft =
-      WSeq planner reviewersCombined TranscriptFinalToPromptArgs
+      WSeq planner reviewersCombined (seqPolicy TranscriptFinalToPromptArgs)
 
     reviewersCombined =
-      WSeq
-        (WPar safeReviewerA safeReviewerB reviewersToRefinerInput)
-        refiner
-        (TranscriptPolicyFunc id)
-      where
-        safeReviewerA = WCatch (emptyFinal "Reviewer A failed") reviewerA
-        safeReviewerB = WCatch (emptyFinal "Reviewer B failed") reviewerB
+      WLabel (Label "reviewers") $
+        WSeq
+          (WPar safeReviewerA safeReviewerB reviewersToRefinerInput)
+          refiner
+          (seqPolicy (TranscriptPolicyFunc id))
 
-    reviewersToRefinerInput :: MergePolicy Final Final PromptArgs
+    safeReviewerA = WCatch (emptyFinal "Reviewer A failed") reviewerA
+    safeReviewerB = WCatch (emptyFinal "Reviewer B failed") reviewerB
+
+    reviewersToRefinerInput :: AnyMergePolicy Final Final PromptArgs
     reviewersToRefinerInput =
-      MergePolicyFunc $ \reviewA reviewB ->
-        PromptArgs
-          { history = [],
-            prompt =
-              T.unlines
-                [ "You are receiving two completed reviewer drafts.",
-                  "Consolidate them into a final refined review now.",
-                  "Do not ask for more input. Do not wait for user action.",
-                  "",
-                  "Reviewer A Draft:",
-                  reviewA.text,
-                  "",
-                  "Reviewer B Draft:",
-                  reviewB.text,
-                  "",
-                  "Required output:",
-                  "1) Consolidated findings by severity",
-                  "2) Concrete next steps per finding",
-                  "3) Brief conflict-resolution notes where drafts disagree"
-                ]
-          }
+      BlackboardPar $ \bv _ _ ->
+        let reviewA = cellText <$> parBranch bv SideLeft
+            reviewB = cellText <$> parBranch bv SideRight
+         in PromptArgs
+              { history = [],
+                prompt =
+                  T.unlines
+                    [ "You are receiving two completed reviewer drafts.",
+                      "Consolidate them into a final refined review now.",
+                      "Do not ask for more input. Do not wait for user action.",
+                      "",
+                      "Reviewer A Draft:",
+                      fromMaybe "" reviewA,
+                      "",
+                      "Reviewer B Draft:",
+                      fromMaybe "" reviewB,
+                      "",
+                      "Required output:",
+                      "1) Consolidated findings by severity",
+                      "2) Concrete next steps per finding",
+                      "3) Brief conflict-resolution notes where drafts disagree"
+                    ]
+              }
 
     deciderWorkflow =
       WSeq
-        (WLift (pure . loopContextToPromptArgs))
+        (WBlackboardPrompt wf1DeciderPrompt (AgentWithModels deciderAgent models))
         deciderSubmit
-        (TranscriptPolicyFunc id)
+        (seqPolicy TranscriptFinalToPromptArgs)
 
     mkConditionalLoop maxIterations body decider =
-      WSeq
-        (WLoopWhile maxIterations decider shouldContinuePolicy [] TranscriptFinalToPromptArgs body)
-        finalizer
-        TranscriptFinalToPromptArgs
+      WLabel (Label "refinement-loop") $
+        WSeq
+          ( WLoopWhile
+              maxIterations
+              decider
+              (blackboardLoopDec wf1DeciderContinue)
+              []
+              (blackboardLoopFeed wf1RefinerLoopFeed)
+              body
+          )
+          finalizer
+          (seqPolicyBB wf1FinalizerInput)
 
-    shouldContinuePolicy :: TranscriptPolicy LoopDecision Bool
-    shouldContinuePolicy = TranscriptPolicyFunc (\d -> d.shouldContinue)
+refinerBodyPath :: BlackboardView -> Path
+refinerBodyPath bv =
+  case innermostLoopPath bv of
+    Nothing -> Child Root (Label "refiner")
+    Just loopP -> Child (loopBodyPath loopP) (Label "refiner")
 
-loopContextToPromptArgs :: LoopContext PromptArgs Final -> PromptArgs
-loopContextToPromptArgs ctx =
-  PromptArgs
-    { history = [],
-      prompt =
-        T.unlines
-          [ "Decide if another refinement iteration is needed.",
-            "Iteration: " <> T.pack (show ctx.lcIteration) <> "/" <> T.pack (show ctx.lcMaxIterations),
-            "Current prompt:",
-            ctx.lcNextInput.prompt,
-            "",
-            "Latest output:",
-            ctx.lcOutput.text,
-            "",
-            "Call the submit_decision tool with shouldContinue and reason."
-          ]
-    }
+maybeCellText :: Maybe Cell -> Text
+maybeCellText = maybe "" cellText
+
+wf1DeciderPrompt :: BlackboardView -> PromptArgs
+wf1DeciderPrompt bv =
+  let slice = loopSlice bv
+      iter = maybe 1 (.lsIteration) slice
+      maxIter = maybe 1 (.lsMax) slice
+      planner = maybeCellText (globalLabel bv (Label "planner"))
+      reviewA = maybeCellText (globalLabel bv (Label "reviewer-a"))
+      reviewB = maybeCellText (globalLabel bv (Label "reviewer-b"))
+      refinerPath = refinerBodyPath bv
+      priorLines =
+        concatMap
+          (\(n, cell) -> ["Iteration " <> T.pack (show n) <> ":", cellText cell, ""])
+          (zip ([1 :: Int ..] :: [Int]) (priorIterations bv refinerPath))
+      currentRef = maybeCellText (atBodyLabel bv (Label "refiner"))
+   in PromptArgs
+        { history = [],
+          prompt =
+            T.unlines $
+              [ "Decide whether another refinement iteration is needed.",
+                "Current iteration: " <> T.pack (show iter) <> "/" <> T.pack (show maxIter),
+                "",
+                "Original plan:",
+                planner,
+                "",
+                "Reviewer A:",
+                reviewA,
+                "",
+                "Reviewer B:",
+                reviewB,
+                ""
+              ]
+                ++ (if null priorLines then [] else "Prior refiner outputs:" : priorLines)
+                ++ [ "",
+                     "Latest refiner output:",
+                     currentRef,
+                     "",
+                     "Call submit_decision with shouldContinue and reason.",
+                     "Set shouldContinue=false when output is coherent, deduplicated, and actionable.",
+                     "Set shouldContinue=true when meta/process language appears (FAILED, BLOCKED, submission issues)."
+                   ]
+        }
+
+wf1RefinerLoopFeed :: BlackboardView -> LoopSlice -> Final -> PromptArgs
+wf1RefinerLoopFeed bv slice _ =
+  let iter = slice.lsIteration
+      maxIter = slice.lsMax
+      planner = maybeCellText (globalLabel bv (Label "planner"))
+      reviewA = maybeCellText (globalLabel bv (Label "reviewer-a"))
+      reviewB = maybeCellText (globalLabel bv (Label "reviewer-b"))
+      refinerPath = refinerBodyPath bv
+      priorLines =
+        concatMap
+          (\(n, cell) -> ["Prior refiner " <> T.pack (show n) <> ":", cellText cell, ""])
+          (zip ([1 :: Int ..] :: [Int]) (priorIterations bv refinerPath))
+   in PromptArgs
+        { history = [],
+          prompt =
+            T.unlines $
+              [ "Refinement iteration " <> T.pack (show iter) <> "/" <> T.pack (show maxIter),
+                "",
+                "Re-read the full audit context from the blackboard and produce an improved consolidation.",
+                "",
+                "Original plan:",
+                planner,
+                "",
+                "Reviewer A:",
+                reviewA,
+                "",
+                "Reviewer B:",
+                reviewB,
+                ""
+              ]
+                ++ priorLines
+                ++ [ "",
+                     "Required output:",
+                     "1) Consolidated findings by severity",
+                     "2) Concrete next steps per finding",
+                     "3) Brief conflict-resolution notes where drafts disagree",
+                     "Do not ask for more input. Deliver the refined result immediately."
+                   ]
+        }
+
+wf1DeciderContinue :: BlackboardView -> LoopSlice -> LoopDecision -> Bool
+wf1DeciderContinue bv slice (LoopDecision wants _) =
+  (slice.lsIteration < slice.lsMax)
+    && ( let refinerPath = refinerBodyPath bv
+             priorTexts = map cellText (priorIterations bv refinerPath)
+             currentText = maybeCellText (atBodyLabel bv (Label "refiner"))
+             regressing = not (null priorTexts) && currentText == last priorTexts
+             metaFailure =
+               any
+                 (`T.isInfixOf` currentText)
+                 ["FAILED", "BLOCKED", "missing submission", "process failed"]
+          in (metaFailure || (wants && not regressing))
+       )
+
+wf1FinalizerInput :: BlackboardView -> PromptArgs
+wf1FinalizerInput bv =
+  let planner = maybeCellText (globalLabel bv (Label "planner"))
+      reviewA = maybeCellText (globalLabel bv (Label "reviewer-a"))
+      reviewB = maybeCellText (globalLabel bv (Label "reviewer-b"))
+      refinerPath = refinerBodyPath bv
+      priorRefs = map cellText (priorIterations bv refinerPath)
+      latestRef = maybeCellText (atBodyLabel bv (Label "refiner"))
+      allRefs =
+        case priorRefs of
+          [] -> [latestRef]
+          _
+            | latestRef == last priorRefs -> priorRefs
+            | T.null latestRef -> priorRefs
+            | otherwise -> priorRefs ++ [latestRef]
+      iterInfo =
+        maybe "unknown" (\s -> T.pack (show s.lsIteration) <> "/" <> T.pack (show s.lsMax)) (loopSlice bv)
+   in PromptArgs
+        { history = [],
+          prompt =
+            T.unlines $
+              [ "Produce the final audit report from the full blackboard context below.",
+                "Refinement loop completed after " <> iterInfo <> " iteration(s).",
+                "",
+                "Original plan:",
+                planner,
+                "",
+                "Reviewer A findings:",
+                reviewA,
+                "",
+                "Reviewer B findings:",
+                reviewB,
+                "",
+                "Refinement history:"
+              ]
+                ++ concatMap (\t -> ["---", t, ""]) allRefs
+                ++ [ "Required output order:",
+                     "1) Executive summary",
+                     "2) Findings by severity",
+                     "3) Recommended action plan."
+                   ]
+        }
 
 plannerAgent :: Agent
 plannerAgent =
@@ -181,7 +339,7 @@ refinerAgent =
         Just $
           T.unlines
             [ "You are a refiner agent.",
-              "Input is a combined review draft.",
+              "Input is a combined review draft assembled from the blackboard.",
               "Improve clarity, remove duplicates, and ensure each finding has actionable next steps.",
               "Keep technical precision and do not drop important findings.",
               "Never ask the user for more input. Produce the refined result immediately.",
@@ -201,6 +359,7 @@ finalizerAgent =
         Just $
           T.unlines
             [ "You are the finalizer.",
+              "You receive the full audit context assembled from the blackboard.",
               "Produce the final audit report in this order:",
               "1) Executive summary",
               "2) Findings by severity",
@@ -221,8 +380,8 @@ deciderAgent =
       agSystemPrompt =
         Just $
           T.unlines
-            [ "You decide whether the loop should continue.",
-              "You receive loop context including current output and past outputs.",
+            [ "You decide whether the refinement loop should continue.",
+              "You receive a rich blackboard snapshot: plan, reviewer outputs, prior refiner iterations, and the latest refiner output.",
               "When ready, call submit_decision with shouldContinue and reason.",
               "Set shouldContinue=true only if substantial issues remain unresolved,",
               "or if the report quality is still too low for handoff.",

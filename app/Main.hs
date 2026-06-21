@@ -32,19 +32,18 @@ import LLM.Generate.Types
   )
 import LLM.Load.FsTools (fsTools')
 import LLM.Load.LoadModels (loadModelsOrThrow)
-import LLM.Workflow (ToolOutcome (ToolReply, ToolWorkflow))
+import LLM.Workflow
+    ( ToolOutcome(ToolReply, ToolWorkflow),
+      AgentWithModels(..),
+      CID(..),
+      Final(..),
+      GetCid(..),
+      PromptArgs(..),
+      TypedWorkflowTool(..),
+      Workflow(..) )
 import LLM.Workflow.ToolUtils (typedWorkflowToolToTool)
-import LLM.Workflow.Types
-  ( AgentWithModels (..),
-    CID (CID),
-    Final (..),
-    GetCid (..),
-    LoopContext (..),
-    PromptArgs (..),
-    TranscriptPolicy (..),
-    TypedWorkflowTool (TypedWorkflowTool),
-    Workflow (..),
-  )
+import LLM.Workflow.Types (AnyLoopDecPolicy, AnyLoopFeedPolicy, TranscriptPolicy (TranscriptFinalText))
+import LLM.Workflow.Utils (mapPolicy)
 import LLM.Workflow.Workflow
   ( runWorkflow,
   )
@@ -115,12 +114,12 @@ mkAgent ag models True = do
   cid <- CID <$> generate
   pure $ WPrompt (AgentWithModels ag models) (Just cid)
 
-mkLoop :: (GetCid x) => Int -> TranscriptPolicy o i -> [x] -> Workflow i o -> Workflow i o
+mkLoop :: (GetCid x) => Int -> AnyLoopFeedPolicy i o -> [x] -> Workflow i o -> Workflow i o
 mkLoop n policy scope wf = WLoop n wf policy cids
   where
     cids = concatMap getCid scope :: [CID]
 
-mkLoopWhile :: (GetCid x) => Int -> TranscriptPolicy o i -> Workflow (LoopContext i o) d -> TranscriptPolicy d Bool -> [x] -> Workflow i o -> Workflow i o
+mkLoopWhile :: (GetCid x) => Int -> AnyLoopFeedPolicy i o -> Workflow PromptArgs d -> AnyLoopDecPolicy d -> [x] -> Workflow i o -> Workflow i o
 mkLoopWhile maxIterations bodyPolicy decider decisionPolicy scope = WLoopWhile maxIterations decider decisionPolicy cids bodyPolicy
   where
     cids = concatMap getCid scope :: [CID]
@@ -163,7 +162,7 @@ subagentOnce usedRef wf auditPrompt name description =
           writeIORef usedRef True
           pure $
             ToolWorkflow
-              (WMap wf TranscriptFinalText)
+              (WMap wf (mapPolicy TranscriptFinalText))
               PromptArgs {history = [], prompt = auditPrompt}
 
 printGenerateResult :: Either GenerateErrorResult GenerateTextResult -> IO ()

@@ -12,13 +12,23 @@ module LLM.Workflow
     ToolOutcome (..),
     SomeSubmit (..),
     TypedWorkflowTool (..),
+    Label (..),
+    BlackboardView (..),
+    Blackboard (..),
+    PolicySite (..),
+    AnySeqPolicy (..),
+    AnyMergePolicy (..),
+    AnyLoopFeedPolicy (..),
+    AnyLoopDecPolicy (..),
+    AnyMapPolicy (..),
+    module LLM.Workflow.Blackboard,
     module LLM.Workflow.Workflow,
     module LLM.Workflow.ToolUtils,
     module LLM.Workflow.Utils,
   )
 where
 
+import LLM.Workflow.Blackboard
 import LLM.Workflow.ToolUtils
-import LLM.Workflow.Types
 import LLM.Workflow.Utils
 import LLM.Workflow.Workflow
