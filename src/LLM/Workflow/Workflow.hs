@@ -1,4 +1,8 @@
-module LLM.Workflow.Workflow where
+module LLM.Workflow.Workflow
+  ( runWorkflow,
+    generateTextWF,
+  )
+where
 
 import Data.Map qualified as Map
 import Data.Maybe (fromMaybe)
@@ -12,6 +16,8 @@ import LLM
     GenerateError (..),
     GenerateErrorResult (..),
     GenerateResult,
+    GenerateTextResult (..),
+    ModelWithFallbacks (..),
     RuntimeArgs,
     StreamChunk (..),
     ToolCall (..),
@@ -28,7 +34,7 @@ import LLM.Agent.ToolUtils (createToolContext, getResolvedTools)
 import LLM.Agent.Types (Agent (..), RuntimeArgs (..), ToolMap)
 import LLM.Workflow.ToolUtils (executeTool, mkSomeSubmit)
 import LLM.Workflow.Types
-  ( AgentWithModels (agent, models),
+  ( AgentWithModels (..),
     CID (..),
     Kont (..),
     LoopContext (..),
@@ -45,6 +51,7 @@ import LLM.Workflow.Utils
   ( CatchFrame (CatchFrame),
     ensureAgentTool,
     extendToolMap,
+    finalToGenerateTextResult,
     lookupHistory,
     mergePolicy,
     pendingToFinal,
@@ -55,6 +62,7 @@ import LLM.Workflow.Utils
     showStep,
     stackSize,
     transcriptPolicy,
+    turnsToPromptArgs,
     unwindPastTools,
     unwindToCatch,
     updateHistory,
@@ -113,6 +121,22 @@ callLLMO toolMap rt pending = do
 runWorkflow :: ToolMap ToolOutcome -> RuntimeArgs -> Workflow i o -> i -> IO (Either GenerateError o, Usage)
 runWorkflow toolMap rt workflow i =
   loop toolMap rt (Stack emptyUsage (RunWorkflow workflow i) KEmpty)
+
+-- | Agent loop via the workflow engine; supports tools that return 'ToolWorkflow'.
+generateTextWF ::
+  Agent ->
+  ModelWithFallbacks ->
+  ToolMap ToolOutcome ->
+  RuntimeArgs ->
+  [Turn] ->
+  IO (Either GenerateErrorResult GenerateTextResult)
+generateTextWF agent models toolMap rt turns = do
+  let input = turnsToPromptArgs turns
+      wf = WPrompt (AgentWithModels agent models) Nothing
+  (result, usage) <- runWorkflow toolMap rt wf input
+  case result of
+    Left err -> pure $ Left $ GenerateErrorResult err [] usage
+    Right final -> pure $ Right $ finalToGenerateTextResult rt final usage
 
 usageCents :: Usage -> Int
 usageCents u = round (u.usageTotalCost * 100)

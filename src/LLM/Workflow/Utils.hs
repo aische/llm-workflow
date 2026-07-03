@@ -4,14 +4,15 @@ import Data.Map qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import LLM (getToolCalls)
-import LLM.Agent (Agent (..))
-import LLM.Agent.Types (ToolMap)
+import LLM.Agent.Types (Agent (..), RuntimeArgs (..), Tool (..), ToolMap)
 import LLM.Core.Types
   ( ChatResponse (..),
     ToolCall (..),
     ToolResult (..),
     Turn (AssistantTurn, ToolTurn, UserTurn),
   )
+import LLM.Core.Usage (Usage)
+import LLM.Generate.Types (GenerateTextResult (..))
 import LLM.Workflow.Types
   ( AgentWithModels (..),
     CID,
@@ -23,10 +24,46 @@ import LLM.Workflow.Types
     PromptArgs (PromptArgs, history, prompt),
     SomeSubmit (..),
     Step (..),
-    ToolOutcome,
+    ToolOutcome (ToolReply),
     TranscriptPolicy (..),
   )
 import Unsafe.Coerce (unsafeCoerce)
+
+-- * generateTextWF helpers -------------------------------------------------
+
+liftTextToolMap :: ToolMap Text -> ToolMap ToolOutcome
+liftTextToolMap = fmap liftTextTool
+  where
+    liftTextTool tool =
+      tool {toolExecute = \ctx args -> ToolReply <$> tool.toolExecute ctx args}
+
+-- | Split conversation turns into workflow prompt input.
+-- The last user message becomes the prompt; everything before is history.
+turnsToPromptArgs :: [Turn] -> PromptArgs
+turnsToPromptArgs turns =
+  case breakLastUserTurn turns of
+    Just (history, prompt) -> PromptArgs {history, prompt}
+    Nothing -> PromptArgs {history = turns, prompt = ""}
+
+breakLastUserTurn :: [Turn] -> Maybe ([Turn], Text)
+breakLastUserTurn turns = go (length turns - 1)
+  where
+    go i
+      | i < 0 = Nothing
+      | UserTurn p <- turns !! i = Just (take i turns, p)
+      | otherwise = go (i - 1)
+
+finalToGenerateTextResult :: RuntimeArgs -> Final -> Usage -> GenerateTextResult
+finalToGenerateTextResult rt final usage =
+  GenerateTextResult
+    { gtrGenerationId = rt.rtGenerationId,
+      gtrNewMessages = dropInitialUserPrompt final.newMessages,
+      gtrText = final.text,
+      gtrUsage = usage
+    }
+  where
+    dropInitialUserPrompt (_ : rest) = rest
+    dropInitialUserPrompt [] = []
 
 -- * Conversation mapping functions -----------------------------------------
 
