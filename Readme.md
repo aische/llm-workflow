@@ -133,7 +133,7 @@ Modules:
 ## Status and limitations
 
 - **`WPar` runs sequentially** — branches execute one after another (`KPar1` then `KPar2`), not concurrently. The combinator models structural parallelism for merging outputs, not parallel execution.
-- **Policies are local** — each policy receives only the immediate predecessor value (or pair of branch outputs). Cross-step context requires hand-built prompts or custom `MergePolicyFunc` / `TranscriptPolicyFunc` wiring. A labeled blackboard for path-addressable workflow state is planned; see [`blackboard-planning.md`](blackboard-planning.md).
+- **Policies are local** — each policy receives only the immediate predecessor value (or pair of branch outputs). Cross-step context requires hand-built prompts or custom `MergePolicyFunc` / `TranscriptPolicyFunc` wiring. An experimental labeled blackboard for path-addressable workflow state lives on the [`aische/blackboard`](https://github.com/aische/llm-workflow/tree/aische/blackboard) branch.
 
 ## License
 
