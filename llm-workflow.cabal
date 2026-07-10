@@ -4,9 +4,15 @@ name:               llm-workflow
 
 version:            0.1.0.0
 
-synopsis:           A simple LLM workflow library
+synopsis:
+    Stack-based multi-agent LLM workflow engine (Haskell EDSL)
 
-description:        A simple LLM workflow library
+description:
+    Composable multi-agent LLM pipelines as a typed embedded DSL (Workflow i o):
+    prompt agents, structured submits, sequential and parallel steps, loops, and
+    nested workflows callable from tools. A continuation-stack interpreter
+    handles LLM calls, tool rounds, transcript policies, and usage accounting.
+    Built on llm-simple.
 
 license:            BSD-3-Clause
 
@@ -16,7 +22,7 @@ author:             Daniel van den Eijkel
 
 maintainer:         1515314+aische@users.noreply.github.com
 
-category:           unknown
+category:           AI
 build-type:         Simple
 
 -- Extra doc files to be distributed with the package, such as a CHANGELOG or a README.
